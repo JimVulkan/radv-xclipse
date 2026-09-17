@@ -42,10 +42,13 @@ The NDK path can also come from `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`. The bu
 writes a package to `dist/`: a zip with `meta.json`, `vulkan.radeon.so` and `NOTICE.txt`, for
 emulators that load custom Vulkan drivers from a zip.
 
-## Xclipse 530
+## Compatibility
 
-The driver ignores the Xclipse 530 unless `TITAN_EXPERIMENTAL=1` is set. Apps that cannot set
-environment variables can use `adb shell setprop debug.radv_titan_experimental 1`.
+Currently, the driver fully works only on the Xclipse 920. As for other models, they're not
+compatible for now. There's partial compatibility for the Xclipse 530, but it's currently broken
+and in current developmet, and if you really want to try it, set `TITAN_EXPERIMENTAL=1` in any
+app that can set local environment variables (`adb shell setprop debug.radv_titan_experimental 1` 
+for the apps that can't set environment variables).
 
 ## Runtime switches
 
@@ -59,6 +62,11 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_uf` | `RADV_XCLIPSE_UF` | `1` restores the user fence on graphics submits |
 | `debug.radv_xclipse_mtype` | `RADV_XCLIPSE_MTYPE` | VA map MTYPE: `0` default, `3` upstream |
 | `debug.radv_xclipse_pal_heaps` | `RADV_XCLIPSE_PAL_HEAPS` | `0` restores the single memory heap |
+
+## Disclaimer
+
+In order to realize this project and speed up a lot of its aspects, large use of AI was used.
+If you don't like AI being involved, you're free to skip this GitHub repository.
 
 ## License
 
