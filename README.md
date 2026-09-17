@@ -65,8 +65,8 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 
 ## Disclaimer
 
-In order to realize this project and speed up a lot of its aspects, large use of AI was used.
-If you don't like AI being involved, you're free to skip this GitHub repository.
+This project was developed with heavy use of AI tools. Every change is built and tested on a
+Galaxy S22 Ultra (SM-S908B, Xclipse 920) before it is published.
 
 ## License
 
