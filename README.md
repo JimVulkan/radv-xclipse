@@ -46,7 +46,7 @@ emulators that load custom Vulkan drivers from a zip.
 
 Currently, the driver fully works only on the Xclipse 920. As for other models, they're not
 compatible for now. There's partial compatibility for the Xclipse 530, but it's currently broken
-and in current developmet, and if you really want to try it, set `TITAN_EXPERIMENTAL=1` in any
+and in current development, and if you really want to try it, set `TITAN_EXPERIMENTAL=1` in any
 app that can set local environment variables (`adb shell setprop debug.radv_titan_experimental 1` 
 for the apps that can't set environment variables).
 
