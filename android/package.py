@@ -68,7 +68,7 @@ def main():
         'schemaVersion': 1,
         'name': 'RADV Xclipse (Mesa %s%s)' % (mesa_version, suffix),
         'description': 'RADV for Samsung Xclipse GPUs, based on Mesa %s.' % mesa_version,
-        'author': 'radv-xclipse',
+        'author': 'JimVulkan',
         'packageVersion': count,
         'vendor': 'Mesa',
         'driverVersion': vulkan,
