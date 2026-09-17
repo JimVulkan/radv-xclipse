@@ -1,0 +1,8 @@
+/build*/
+!/build-support/
+/dist/
+/subprojects/*/
+!/subprojects/packagefiles/
+/subprojects/packagecache/
+*.pyc
+__pycache__/

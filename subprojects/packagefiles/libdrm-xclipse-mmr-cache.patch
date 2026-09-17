@@ -1,0 +1,51 @@
+Xclipse: cache GB_ADDR_CONFIG across amdgpu device inits.
+
+diff --git a/amdgpu/amdgpu_gpu_info.c b/amdgpu/amdgpu_gpu_info.c
+--- a/amdgpu/amdgpu_gpu_info.c
++++ b/amdgpu/amdgpu_gpu_info.c
+@@ -24,6 +24,7 @@
+ 
+ #include <errno.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ #include "amdgpu.h"
+ #include "amdgpu_drm.h"
+@@ -212,10 +213,33 @@ drm_private int amdgpu_query_gpu_info_init(amdgpu_device_handle dev)
+ 		}
+ 	}
+ 
+-	r = amdgpu_read_mm_registers(dev, 0x263e, 1, 0xffffffff, 0,
+-					     &dev->info.gb_addr_cfg);
+-	if (r)
+-		return r;
++	/* Xclipse: GB_ADDR_CONFIG is static, so read it once per process (keyed on asic_id).
++	 * Each READ_MMR_REG is a raw MMIO access, which is unsafe during an sgpu power transition.
++	 * RADV_XCLIPSE_LIBDRM_MMR_CACHE=0 restores the read on every init. */
++	{
++		static int cache_on = -1;
++		static uint32_t cached_asic_id;
++		static uint32_t cached_gb_addr_cfg;
++		static int cache_valid;
++
++		if (cache_on < 0) {
++			const char *e = getenv("RADV_XCLIPSE_LIBDRM_MMR_CACHE");
++			cache_on = e ? atoi(e) : 1;
++		}
++
++		if (cache_on && cache_valid && cached_asic_id == dev->info.asic_id) {
++			dev->info.gb_addr_cfg = cached_gb_addr_cfg;
++		} else {
++			r = amdgpu_read_mm_registers(dev, 0x263e, 1, 0xffffffff, 0,
++						     &dev->info.gb_addr_cfg);
++			if (r)
++				return r;
++
++			cached_asic_id = dev->info.asic_id;
++			cached_gb_addr_cfg = dev->info.gb_addr_cfg;
++			cache_valid = 1;
++		}
++	}
+ 
+ 	if (dev->info.family_id < AMDGPU_FAMILY_AI) {
+ 		r = amdgpu_read_mm_registers(dev, 0x2644, 32, 0xffffffff, 0,

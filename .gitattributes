@@ -1,0 +1,9 @@
+*.csv eol=crlf
+* text=auto
+*.jpg binary
+*.png binary
+*.gif binary
+*.ico binary
+*.cl gitlab-language=c
+*.sh text eol=lf
+*.cmd text eol=crlf
