@@ -20,6 +20,9 @@
 #include "ac_xclipse_log.h"
 #include "tools/radv_debug_hang.h"
 #include <android/log.h>
+#if DETECT_OS_ANDROID
+#include <sys/system_properties.h>
+#endif
 #include <unistd.h>
 #include "radv_entrypoints.h"
 #include "radv_instance.h"
@@ -96,6 +99,36 @@ static const struct debug_control radv_debug_options[] = {
    {"noheap", RADV_DEBUG_NO_HEAP},
    {NULL, 0},
 };
+
+/* A knob's value from the environment, falling back to an Android system property.
+ *
+ * RADV's knobs are environment variables, and an APK -- an emulator, a Minecraft launcher -- has
+ * no way to set one in the process that loads it, which is exactly where a field A/B has to run.
+ * A property does reach a running app, and `adb shell setprop debug.radv_debug nongg` needs no
+ * root and no rebuild. The environment still wins when both are set, so nothing changes on
+ * desktop or for a shell-launched probe.
+ *
+ * `buf` must outlive the returned pointer; callers keep it on the stack for the parse. */
+#define RADV_OPTION_MAX 128
+
+static const char *
+radv_option(const char *env, const char *prop, char *buf, size_t size)
+{
+   const char *e = os_get_option(env);
+   if (e && e[0])
+      return e;
+#if DETECT_OS_ANDROID
+   assert(size > PROP_VALUE_MAX);
+   buf[0] = '\0';
+   if (__system_property_get(prop, buf) > 0 && buf[0])
+      return buf;
+#else
+   (void)prop;
+   (void)buf;
+   (void)size;
+#endif
+   return NULL;
+}
 
 const char *
 radv_get_debug_option_name(int id)
@@ -331,9 +364,21 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
 
    simple_mtx_init(&instance->shader_dump_mtx, mtx_plain);
 
-   instance->debug_flags = parse_debug_string(os_get_option("RADV_DEBUG"), radv_debug_options);
-   instance->perftest_flags = parse_debug_string(os_get_option("RADV_PERFTEST"), radv_perftest_options);
-   instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
+   /* Properties, not env: an APK -- an emulator, a Minecraft launcher -- cannot set an environment
+    * variable in the process that loads us, so on Android every one of these is also readable as
+    * debug.radv_debug / debug.radv_perftest / debug.radv_experimental. Both arms print, so a run
+    * with no line is a build that did not take rather than a control arm. */
+   char dbg_buf[RADV_OPTION_MAX], perf_buf[RADV_OPTION_MAX], exp_buf[RADV_OPTION_MAX];
+   const char *dbg_opt = radv_option("RADV_DEBUG", "debug.radv_debug", dbg_buf, sizeof(dbg_buf));
+   const char *perf_opt = radv_option("RADV_PERFTEST", "debug.radv_perftest", perf_buf, sizeof(perf_buf));
+   const char *exp_opt = radv_option("RADV_EXPERIMENTAL", "debug.radv_experimental", exp_buf, sizeof(exp_buf));
+   AC_XCLIPSE_LOGP(ANDROID_LOG_INFO, "RADV_ARM", "[ARM] RADV_DEBUG=%s RADV_PERFTEST=%s RADV_EXPERIMENTAL=%s",
+                   dbg_opt ? dbg_opt : "(unset)", perf_opt ? perf_opt : "(unset)",
+                   exp_opt ? exp_opt : "(unset)");
+
+   instance->debug_flags = parse_debug_string(dbg_opt, radv_debug_options);
+   instance->perftest_flags = parse_debug_string(perf_opt, radv_perftest_options);
+   instance->experimental_flags = parse_debug_string(exp_opt, radv_experimental_options);
    instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
    instance->profile_pstate = radv_parse_pstate(debug_get_option("RADV_PROFILE_PSTATE", "peak"));
    instance->queue_disable_flags = parse_debug_string(os_get_option("RADV_QUEUE_DISABLE"), radv_queue_disable_options);

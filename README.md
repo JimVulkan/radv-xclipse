@@ -1,6 +1,6 @@
 # RADV for Samsung Xclipse
 
-A port of Mesa's RADV Vulkan driver to Samsung Xclipse GPUs on Android, based on Mesa 26.2.1.
+A port of Mesa's RADV Vulkan driver to Samsung Xclipse GPUs on Android, based on Mesa 26.2.3.
 The Xclipse 920 (Exynos 2200) is supported. The Xclipse 530 (Exynos 1480) is highly experimental
 and broken.
 
