@@ -2197,9 +2197,10 @@ lower_image_sample(lower_context* ctx, aco_ptr<Instruction>& instr)
    unsigned vaddr_size = linear_vgpr.size();
    unsigned non_mask_operands = instr->operands.size() - (2 * disable_wqm);
    unsigned num_copied_vgprs = non_mask_operands - 4;
-   nsa_size = num_copied_vgprs > 0 && (ctx->program->gfx_level >= GFX11 || vaddr_size <= nsa_size)
-                 ? nsa_size
-                 : 0;
+   /* GFX11 allows a partial NSA -- separate registers followed by one contiguous tail. The Xclipse
+    * 920 has GFX11 encodings but not that decoder, so it keeps the GFX10.3 rule: all-or-nothing. */
+   const bool partial_nsa = ctx->program->gfx_level >= GFX11 && !ctx->program->gfx10_nsa;
+   nsa_size = num_copied_vgprs > 0 && (partial_nsa || vaddr_size <= nsa_size) ? nsa_size : 0;
 
    Operand vaddr[16];
    unsigned num_vaddr = 0;

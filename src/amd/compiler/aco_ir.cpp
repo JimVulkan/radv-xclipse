@@ -76,6 +76,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       options->gfx_level >= GFX11 && options->family == CHIP_VANGOGH;
    program->gfx10_4_fmask = program->gfx10_export_encoding; /* same Xclipse 920 condition */
    program->gfx10_sendmsg = program->gfx10_export_encoding; /* same Xclipse 920 condition */
+   program->gfx10_nsa = program->gfx10_export_encoding;     /* same Xclipse 920 condition */
    program->wave_size = info->wave_size;
    program->lane_mask = program->wave_size == 32 ? s1 : s2;
    program->preserve_s2 = info->vs.preserve_s2;

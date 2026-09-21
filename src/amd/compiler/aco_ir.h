@@ -2354,6 +2354,13 @@ public:
    /* Xclipse 920 (GFX10_4): the message bus is GFX10.3, so s_sendmsg imm 3 is GS_DONE, not
     * dealloc_vgprs. Never insert dealloc_vgprs. */
    bool gfx10_sendmsg = false;
+   /* Xclipse 920 (GFX10_4): the MIMG address decoder does not implement GFX11 partial NSA, where
+    * the last NSA register continues contiguously with the rest of the address. A sample_d with a
+    * 2D coordinate has six address operands, so GFX11 would put u,v in one two-register tail --
+    * and this hardware reads v from the wrong register (Minecraft 26.x terrain samples its atlas
+    * with textureGrad). Use NSA only when every operand gets its own slot, as on GFX10.3.
+    * See lower_image_sample(). */
+   bool gfx10_nsa = false;
    bool is_prolog = false;
    bool is_epilog = false;
 

@@ -549,7 +549,12 @@ emit_mimg(Builder& bld, aco_opcode op, std::vector<Temp> dsts, Temp rsrc, Operan
    size_t nsa_size = bld.program->dev.max_nsa_vgprs;
    if (!is_vsample && bld.program->gfx_level >= GFX12)
       nsa_size++; /* VIMAGE can encode one more VADDR */
-   nsa_size = bld.program->gfx_level >= GFX11 || coords.size() <= nsa_size ? nsa_size : 0;
+   /* GFX11 packs whatever does not fit the NSA slots into one contiguous tail (partial NSA). The
+    * Xclipse 920 has GFX11 encodings but not that decoder: with a 2D sample_d (six operands) it read
+    * v from the wrong register, which is Minecraft 26.x terrain's textureGrad. There, as on GFX10.3,
+    * an address that does not fit the NSA slots goes into one contiguous vector instead. */
+   const bool partial_nsa = bld.program->gfx_level >= GFX11 && !bld.program->gfx10_nsa;
+   nsa_size = partial_nsa || coords.size() <= nsa_size ? nsa_size : 0;
 
    const bool strict_wqm = coords[0].regClass().is_linear_vgpr();
    if (strict_wqm)

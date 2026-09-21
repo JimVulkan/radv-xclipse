@@ -12,6 +12,8 @@
 #include "radv_cmd_buffer.h"
 #include "meta/radv_meta.h"
 #include "radv_logcat.h"
+#include "ac_xclipse_log.h"
+#include "vk_enum_to_str.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_rmv.h"
 #include "tools/radv_rra.h"
@@ -8506,6 +8508,109 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
    return result;
 }
 
+
+/* Field instrument for Minecraft's terrain corruption: every distinct vertex-input setup an app
+ * hands us, and the alignment of every distinct vertex-buffer binding, each logged ONCE under
+ * logcat tag RADV_VTX.
+ *
+ * Off unless RADV_XCLIPSE_VTXLOG=1 (or debug.radv_xclipse_vtxlog 1, for apps that cannot set an
+ * environment variable). It is deliberately NOT part of debug.radv_xclipse_log: that is the switch
+ * users turn on for bug reports, and these lines are a bring-up instrument, not a report.
+ *
+ * Every probe built for that bug used a vertex layout of its own invention and passed. The layout
+ * the game really uses -- formats, offsets, strides, and whether the buffer offsets it binds are
+ * aligned -- was never observed, and it decides which fetch path runs (a misaligned attribute is
+ * assembled byte by byte instead of loaded whole). This reads it off the real draws. */
+#define RADV_VTX_SEEN 256
+static simple_mtx_t radv_vtx_mtx = SIMPLE_MTX_INITIALIZER;
+static uint64_t radv_vtx_seen[RADV_VTX_SEEN];
+static unsigned radv_vtx_nseen;
+
+static bool
+radv_vtx_log_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *e = getenv("RADV_XCLIPSE_VTXLOG");
+      int on = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      if (!e || !e[0]) {
+         char v[PROP_VALUE_MAX] = {0};
+         on = __system_property_get("debug.radv_xclipse_vtxlog", v) > 0 && v[0] && v[0] != '0';
+      }
+#endif
+      enabled = on;
+   }
+   return enabled;
+}
+
+static bool
+radv_vtx_first_time(uint64_t sig)
+{
+   bool first = true;
+   simple_mtx_lock(&radv_vtx_mtx);
+   for (unsigned i = 0; i < radv_vtx_nseen; i++) {
+      if (radv_vtx_seen[i] == sig) {
+         first = false;
+         break;
+      }
+   }
+   if (first && radv_vtx_nseen < RADV_VTX_SEEN)
+      radv_vtx_seen[radv_vtx_nseen++] = sig;
+   else if (first)
+      first = false; /* table full: stay quiet rather than flood */
+   simple_mtx_unlock(&radv_vtx_mtx);
+   return first;
+}
+
+static void
+radv_xclipse_log_vertex_input(const VkVertexInputBindingDescription2EXT *const *bindings,
+                              uint32_t nattr, const VkVertexInputAttributeDescription2EXT *attrs,
+                              const struct radv_vertex_input_state *vi)
+{
+   if (!radv_vtx_log_enabled())
+      return;
+   uint64_t sig = 0x9e3779b97f4a7c15ull ^ nattr;
+   for (uint32_t i = 0; i < nattr; i++) {
+      const VkVertexInputAttributeDescription2EXT *a = &attrs[i];
+      const VkVertexInputBindingDescription2EXT *b = bindings[a->binding];
+      sig = (sig ^ ((uint64_t)a->location << 56 | (uint64_t)a->binding << 48 |
+                    (uint64_t)(a->format & 0xffff) << 32 | (uint64_t)a->offset << 16 | b->stride)) *
+            0x100000001b3ull;
+   }
+   if (!radv_vtx_first_time(sig))
+      return;
+
+   char line[1024];
+   int n = snprintf(line, sizeof(line), "[VTXIN] %u attr, misaligned=0x%x unaligned=0x%x invalid=0x%x:",
+                    nattr, vi->vbo_misaligned_mask, vi->vbo_unaligned_mask, vi->vbo_misaligned_mask_invalid);
+   for (uint32_t i = 0; i < nattr && n > 0 && n < (int)sizeof(line); i++) {
+      const VkVertexInputAttributeDescription2EXT *a = &attrs[i];
+      const VkVertexInputBindingDescription2EXT *b = bindings[a->binding];
+      const char *fmt = vk_Format_to_str(a->format);
+      if (!strncmp(fmt, "VK_FORMAT_", 10))
+         fmt += 10;
+      n += snprintf(line + n, sizeof(line) - n, " L%u:b%u %s @%u/%u%s", a->location, a->binding, fmt,
+                    a->offset, b->stride, b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? "i" : "");
+   }
+   __android_log_print(ANDROID_LOG_INFO, "RADV_VTX", "%s", line);
+}
+
+static void
+radv_xclipse_log_vertex_buffer(uint32_t binding, uint64_t addr, uint64_t size, uint64_t stride, bool set_stride)
+{
+   if (!size || !radv_vtx_log_enabled())
+      return;
+   /* The address itself changes with every chunk; what decides the fetch path is its alignment. */
+   const uint64_t sig = 0xa5a5000000000000ull | (uint64_t)binding << 40 | (addr & 0xf) << 32 |
+                        (set_stride ? 1ull << 31 : 0) | (stride & 0xffff);
+   if (!radv_vtx_first_time(sig))
+      return;
+   __android_log_print(ANDROID_LOG_INFO, "RADV_VTX", "[VTXBUF] binding %u  addr%%16=%u  stride=%llu%s",
+                   binding, (unsigned)(addr & 0xf), (unsigned long long)stride,
+                   set_stride ? " (set at bind)" : "");
+}
+
 VKAPI_ATTR void VKAPI_CALL
 radv_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
                            const VkBuffer *pBuffers, const VkDeviceSize *pOffsets, const VkDeviceSize *pSizes,
@@ -8563,6 +8668,7 @@ radv_CmdBindVertexBuffers3KHR(VkCommandBuffer commandBuffer, uint32_t firstBindi
       VkDeviceSize size = binding_info->addressRange.size;
       VkDeviceSize stride = binding_info->setStride ? binding_info->addressRange.stride : 0;
       uint64_t addr = size ? binding_info->addressRange.address : 0;
+      radv_xclipse_log_vertex_buffer(idx, addr, size, stride, binding_info->setStride);
 
       if (!!vertex_buffer->bindings[idx].addr != !!addr ||
           (addr && ((vertex_buffer->bindings[idx].addr & 0x3) != (addr & 0x3) ||
@@ -10022,6 +10128,8 @@ radv_CmdSetVertexInputEXT(VkCommandBuffer commandBuffer, uint32_t vertexBindingD
       }
    }
 
+   radv_xclipse_log_vertex_input(bindings, vertexAttributeDescriptionCount, pVertexAttributeDescriptions,
+                                 vertex_input);
    radv_cmd_set_vertex_input(cmd_buffer, vertex_input);
 }
 
