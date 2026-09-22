@@ -149,13 +149,21 @@ _mesa_trace_scope_begin_name(bool cond, const char *name)
    return scope;
 }
 
+/* Without a trace backend the formatted name goes nowhere, and vsnprintf into a 4 KB buffer on
+ * every traced scope (texture uploads, format conversions) is pure overhead. */
+#if defined(HAVE_PERFETTO) || defined(HAVE_GPUVIS) || defined(HAVE_SYSPROF)
+#define _MESA_TRACE_HAS_BACKEND true
+#else
+#define _MESA_TRACE_HAS_BACKEND false
+#endif
+
 __attribute__((format(printf, 2, 3)))
 static inline struct _mesa_trace_scope
 _mesa_trace_scope_begin(bool cond, const char *format, ...)
 {
-   struct _mesa_trace_scope scope = { .cond = cond };
+   struct _mesa_trace_scope scope = { .cond = cond && _MESA_TRACE_HAS_BACKEND };
 
-   if (unlikely(cond)) {
+   if (unlikely(scope.cond)) {
       char name[_MESA_TRACE_SCOPE_MAX_NAME_LENGTH];
       va_list args;
 

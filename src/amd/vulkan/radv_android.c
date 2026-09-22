@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_gralloc/u_gralloc_xclipse_dump.h"
 #include "radv_android.h"
 #include "radv_buffer.h"
 #include "radv_device.h"
@@ -24,6 +25,7 @@
 #include "vk_log.h"
 #include "vk_util.h"
 #include "vk_xclipse_perf.h"
+#include "util/u_xclipse_prof.h"
 
 #define RADV_ANDROID_MAX_PLANES 4
 
@@ -108,6 +110,8 @@ radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
     */
    int dma_buf = gralloc_info->handle->data[0];
    assert(dma_buf >= 0);
+
+   u_gralloc_xclipse_dump("radv", gralloc_info->handle);
 
    VkDeviceMemory memory_h;
 
@@ -228,6 +232,7 @@ radv_QueueSignalReleaseImageANDROID(VkQueue queue_h, uint32_t waitSemaphoreCount
    /* The frame boundary on Android: the platform loader implements VK_KHR_swapchain and drives the
     * ICD through VK_ANDROID_native_buffer, so wsi_QueuePresentKHR is never reached. */
    vk_xclipse_perf_present();
+   u_xclipse_prof_frame();
 
    return vk_common_QueueSignalReleaseImageANDROID(queue_h, waitSemaphoreCount, pWaitSemaphores,
                                                    image_h, pNativeFenceFd);

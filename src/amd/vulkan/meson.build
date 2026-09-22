@@ -198,6 +198,8 @@ libradv_files = files(
   'radv_pipeline_rt.c',
   'radv_pipeline_rt.h',
   'radv_queue.c',
+  'radv_xclipse_prof.c',
+  'radv_xclipse_prof.h',
   'radv_queue.h',
   'radv_radeon_winsys.h',
   'radv_sampler.c',

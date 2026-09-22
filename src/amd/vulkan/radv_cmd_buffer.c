@@ -52,6 +52,7 @@
 #include "util/compiler.h"
 #include "util/fast_idiv_by_const.h"
 #include "util/perf/u_trace.h"
+#include "radv_xclipse_prof.h"
 
 enum {
    RADV_PREFETCH_VBO_DESCRIPTORS = (1 << 0),
@@ -1183,7 +1184,7 @@ radv_write_data(struct radv_cmd_buffer *cmd_buffer, const unsigned engine_sel, c
  * in the device preamble, which never shows up in a captured IB. */
 #define RADV_TITAN_EMIT_PGM_HI(va)                                                                 \
    do {                                                                                            \
-      if (ac_titan_regmap_level >= 7)                                                              \
+      if (ac_titan_regmap_level >= 7 && ac_titan_legacy_pgm_hi())                                  \
          radeon_set_sh_reg(R_00B21C_SPI_SHADER_PGM_RSRC3_GS, S_00B324_MEM_BASE((va) >> 40));       \
    } while (0)
 
@@ -4945,28 +4946,26 @@ radv_gfx6_emit_fb_color_state(struct radv_cmd_buffer *cmd_buffer, int index, con
       radeon_set_context_reg(R_028EC0_CB_COLOR0_ATTRIB2 + index * 4, cb->ac.cb_color_attrib2);
       radeon_set_context_reg(R_028EE0_CB_COLOR0_ATTRIB3 + index * 4, cb->ac.cb_color_attrib3);
 
-      /* CB_COLORi_VIEW (MIP_LEVEL): without it every write lands on level 0. Sweeps TITAN slots
-       * 1..6; see ac_titan_cb_view_slot. -1 keeps the old behaviour. */
-      if (ac_titan_cb_view_slot > 0) {
-         radeon_set_context_reg(SI_CONTEXT_REG_OFFSET + ((0x318 + 9 * index + ac_titan_cb_view_slot) << 2),
-                                cb->ac.cb_color_view);
+      /* DCC (RADV_XCLIPSE_DCC): control and metadata address, through the map like the rest. */
+      if (pdev->xclipse_dcc) {
+         radeon_set_context_reg(R_028C78_CB_COLOR0_DCC_CONTROL + index * 0x3c, cb->ac.cb_dcc_control);
+         radeon_set_context_reg(R_028C94_CB_COLOR0_DCC_BASE + index * 0x3c, cb->ac.cb_dcc_base);
+         radeon_set_context_reg(R_028EA0_CB_COLOR0_DCC_BASE_EXT + index * 4,
+                                S_028EA0_BASE_256B(cb->ac.cb_dcc_base >> 32));
       }
 
-      /* Decoy to identify the view slot: write the correct view to one slot and MIP_LEVEL=7 to
-       * the other; whichever the hardware obeys is the real one.
-       *   RADV_XCLIPSE_TITAN_CBVIEW_DECOY=<slot> */
-      {
-         static int decoy = -2;
-         if (decoy == -2) {
-            const char *e = getenv("RADV_XCLIPSE_TITAN_CBVIEW_DECOY");
-            decoy = (e && e[0]) ? atoi(e) : -1;
-         }
-         if (decoy >= 0) {
-            radeon_set_context_reg(SI_CONTEXT_REG_OFFSET + ((0x318 + 9 * index + decoy) << 2),
-                                   (cb->ac.cb_color_view & C_028C6C_MIP_LEVEL_GFX10) |
-                                      S_028C6C_MIP_LEVEL_GFX10(7));
-         }
-      }
+      /* CB_COLORi_VIEW (SLICE_START, SLICE_MAX, MIP_LEVEL): without it every write lands on
+       * layer 0 of level 0. Written through GFX10_3's register so the kernel map places it
+       * (TITAN 0x319 + 9i, the vendor's slot and GFX10's field layout, both measured).
+       *
+       * It used to be written at a raw TITAN offset, 0x318 + 9i + slot, which the map then
+       * translated AGAIN as if it were a GFX10_3 offset. That happens to land right for MRT 0, 1,
+       * 5 and 6, but MRT 2's view went into MRT 1's CB_COLOR1_INFO, MRT 3's into CB_COLOR1_DCC_BASE,
+       * MRT 4's into CB_COLOR2_CMASK and MRT 7's into CB_COLOR4_INFO -- which is how a register
+       * that fixed every single-target probe cost a real game 25x its frame rate.
+       * RADV_XCLIPSE_TITAN_CBVIEW=0 leaves it unwritten. */
+      if (ac_titan_cb_view_slot > 0)
+         radeon_set_context_reg(R_028C6C_CB_COLOR0_VIEW + index * 0x3c, cb->ac.cb_color_view);
 
       /* Colour target address high half. RADV's targets sit above the 40-bit boundary, and the
        * 530's PAL (low surfaces) never reveals where TITAN keeps it. Default is GFX10_3's 0x028E40;
@@ -8391,6 +8390,8 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
       }
    }
 
+   radv_xprof_begin_cmdbuf(cmd_buffer);
+
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
       const VkCommandBufferInheritanceDescriptorHeapInfoEXT *heap_info =
          vk_find_struct_const(pBeginInfo->pInheritanceInfo->pNext, COMMAND_BUFFER_INHERITANCE_DESCRIPTOR_HEAP_INFO_EXT);
@@ -9055,6 +9056,8 @@ radv_EndCommandBuffer(VkCommandBuffer commandBuffer)
        */
       radv_cp_dma_wait_for_idle(cmd_buffer);
    }
+
+   radv_xprof_end_cmdbuf(cmd_buffer);
 
    radv_describe_end_cmd_buffer(cmd_buffer);
 
@@ -11411,6 +11414,9 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
 
+   if (unlikely(cmd_buffer->xprof_slot))
+      radv_xprof_begin_rendering(cmd_buffer, pRenderingInfo);
+
    /* From the Vulkan spec 1.4.358:
     *
     * "Until this command is called, mappings in the command buffer state are treated as each color
@@ -11533,6 +11539,9 @@ radv_CmdEndRendering2KHR(VkCommandBuffer commandBuffer, const VkRenderingEndInfo
 
    if (need_resolve)
       radv_cmd_buffer_resolve_rendering(cmd_buffer, &rendering_info);
+
+   if (unlikely(cmd_buffer->xprof_slot))
+      radv_xprof_begin_rendering(cmd_buffer, NULL);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -14252,6 +14261,9 @@ radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info
    const bool has_prefetch = pdev->info.gfx_level >= GFX7;
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
+   if (unlikely(cmd_buffer->xprof_pass))
+      radv_xprof_draw_slow(cmd_buffer, drawCount);
+
    ASSERTED const unsigned cdw_max = radeon_check_space(device->ws, cs->b, 4096 + 128 * (drawCount - 1));
 
    /* Consecutive NGG culling draws race on this chip: one per submit is clean, four or more in a
@@ -15439,6 +15451,9 @@ radv_compute_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_disp
 {
    struct radv_compute_pipeline *compute_pipeline = cmd_buffer->state.compute_pipeline;
    const struct radv_shader *compute_shader = cmd_buffer->state.shaders[MESA_SHADER_COMPUTE];
+
+   if (unlikely(cmd_buffer->xprof_slot))
+      radv_xprof_dispatch(cmd_buffer, info->blocks);
 
    radv_before_dispatch(cmd_buffer, compute_pipeline);
    radv_emit_dispatch_packets(cmd_buffer, compute_shader, info);

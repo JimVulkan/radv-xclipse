@@ -36,6 +36,7 @@
 #include "vk_physical_device.h"
 #include "vk_util.h"
 #include "vk_xclipse_perf.h"
+#include "util/u_xclipse_prof.h"
 
 static VkExternalFenceHandleTypeFlags
 vk_sync_fence_import_types(const struct vk_sync_type *type)
@@ -282,13 +283,16 @@ vk_common_WaitForFences(VkDevice _device,
 
    /* Perf accounting: time blocked on the GPU (GPU-limited vs app-CPU-limited). Off by default. */
    const bool xperf = vk_xclipse_perf_enabled();
-   const uint64_t xperf_t0 = xperf ? os_time_get_nano() : 0;
+   const bool xprof = u_xclipse_prof_active();
+   const uint64_t xperf_t0 = xperf || xprof ? os_time_get_nano() : 0;
 
    VkResult result = vk_sync_wait_many(device, fenceCount, waits,
                                        wait_flags, abs_timeout_ns);
 
    if (xperf)
       vk_xclipse_perf_wait(os_time_get_nano() - xperf_t0);
+   if (xprof)
+      u_xclipse_prof_wait(U_XCLIPSE_WAIT_CLIENT_FENCE, os_time_get_nano() - xperf_t0);
 
    STACK_ARRAY_FINISH(waits);
 

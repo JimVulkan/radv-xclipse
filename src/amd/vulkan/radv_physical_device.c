@@ -85,6 +85,24 @@ radv_xclipse_flag(const char *env, const char *prop)
    return false;
 }
 
+/* For default-on Xclipse features: true only if the env var or debug.<prop> is set to "0". */
+static bool
+radv_xclipse_flag_off(const char *env, const char *prop)
+{
+   const char *e = getenv(env);
+   if (e && e[0])
+      return e[0] == '0';
+#if DETECT_OS_ANDROID
+   char full[PROP_NAME_MAX], val[PROP_VALUE_MAX] = {0};
+   snprintf(full, sizeof(full), "debug.%s", prop);
+   if (__system_property_get(full, val) > 0 && val[0])
+      return val[0] == '0';
+#else
+   (void)prop;
+#endif
+   return false;
+}
+
 /* Allocatable system memory from /proc/meminfo MemAvailable; 0 if unavailable (callers must treat
  * 0 as "don't clamp"). Queried per frame, possibly from a thread the GPU waits on: raw
  * open/read/close, no stdio or malloc, cached ~500ms. */
@@ -350,9 +368,11 @@ radv_is_dcc_disabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   /* Xclipse: the GFX11 texture unit cannot decode the GFX10.3 DCC the CB writes (sampled DCC
-    * targets read black). */
-   return instance->debug_flags & RADV_DEBUG_NO_DCC || pdev->info.gfx11_shader_core ||
+   /* Xclipse: off unless RADV_XCLIPSE_DCC. It was disabled for black sampled render targets in Dark
+    * Souls, which turned out to be occlusion queries; the vendor driver compresses its render
+    * targets on the 530 (DCC_ENABLE, 128B independent blocks), which is most of why the same draws
+    * and clears cost it a half to a quarter of the GPU time. */
+   return instance->debug_flags & RADV_DEBUG_NO_DCC || (pdev->info.gfx11_shader_core && !pdev->xclipse_dcc) ||
           (instance->drirc.debug.disable_dcc && pdev->info.gfx_level < GFX12);
 }
 
@@ -2808,20 +2828,6 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    p->shaderBinaryVersion = 1;
 }
 
-/* Xclipse 530 (TITAN) support is experimental and off unless TITAN_EXPERIMENTAL is 1 or true, or
- * setprop debug.radv_titan_experimental 1 for apps that cannot set environment variables. */
-static bool
-radv_titan_experimental(void)
-{
-   const char *v = getenv("TITAN_EXPERIMENTAL");
-#if DETECT_OS_ANDROID
-   char prop[PROP_VALUE_MAX] = {0};
-   if ((!v || !v[0]) && __system_property_get("debug.radv_titan_experimental", prop) > 0)
-      v = prop;
-#endif
-   return v && (!strcmp(v, "1") || !strcasecmp(v, "true"));
-}
-
 static bool
 radv_is_gpu_supported(const struct radeon_info *info)
 {
@@ -2923,12 +2929,6 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    memcpy(&pdev->info, &winsys_info.base, sizeof(pdev->info));
    memcpy(&pdev->syncobj_sync_type, &winsys_info.syncobj_sync_type, sizeof(pdev->syncobj_sync_type));
 
-   if (pdev->info.xclipse_model == AC_XCLIPSE_530 && !radv_titan_experimental()) {
-      mesa_logw("radv: Xclipse 530 support is experimental; set TITAN_EXPERIMENTAL=1 to enable it");
-      result = VK_ERROR_INCOMPATIBLE_DRIVER;
-      goto fail_base;
-   }
-
    for (uint32_t p = RADEON_CTX_PRIORITY_LOW; p <= RADEON_CTX_PRIORITY_REALTIME; p++) {
       if (winsys_info.global_priority_mask & BITFIELD_BIT(p))
          pdev->global_priority_mask |= radeon_to_vk_priority(p);
@@ -3007,6 +3007,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     * RADV_XCLIPSE_NO_BC_EMU=1 or setprop debug.radv_xclipse_no_bc_emu 1. */
    pdev->emulate_bc =
       pdev->info.gfx11_shader_core && !radv_xclipse_flag("RADV_XCLIPSE_NO_BC_EMU", "radv_xclipse_no_bc_emu");
+   pdev->xclipse_dcc = pdev->info.gfx11_shader_core && !radv_xclipse_flag_off("RADV_XCLIPSE_DCC", "radv_xclipse_dcc");
    /* The texture unit decodes ASTC and ETC2/EAC in hardware (codes measured, see
     * ac_xclipse_astc_img_format() and ac_xclipse_etc2_img_format()), so neither is emulated. */
    pdev->xclipse_native_astc = pdev->info.gfx11_shader_core;
@@ -3022,7 +3023,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->emulate_astc = instance->drirc.features.require_astc;
 #endif
 
-   const char *name = ac_get_family_name(pdev->info.family);
+   const char *name = ac_get_gpu_display_name(&pdev->info);
    snprintf(pdev->name, sizeof(pdev->name), "AMD RADV %s%s", name, radv_get_compiler_string(pdev));
    snprintf(pdev->marketing_name, sizeof(pdev->name), "%s (RADV %s%s)", pdev->info.marketing_name, name,
             radv_get_compiler_string(pdev));

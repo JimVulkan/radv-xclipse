@@ -135,6 +135,8 @@ struct radv_physical_device {
    bool emulate_etc2;
    /* The texture unit has no BC4/BC5/BC6H/BC7 decoder; decode them on the GPU at upload. */
    bool emulate_bc;
+   /* Xclipse: DCC on colour targets; RADV_XCLIPSE_DCC=0 / debug.radv_xclipse_dcc 0 turns it off. */
+   bool xclipse_dcc;
 
    /* Whether to emulate ASTC image support on HW without support. */
    bool emulate_astc;

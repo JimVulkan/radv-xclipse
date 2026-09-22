@@ -523,6 +523,11 @@ void ac_compute_driver_uuid(char *uuid, size_t size);
 
 void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t size);
 void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd);
+
+/* The chip's name for device and renderer strings. The Xclipse 920 runs as CHIP_VANGOGH but is
+ * Samsung's cut-down Van Gogh, VANGOGHLITE; everything keyed on the family (shader caches, ISA,
+ * workarounds) keeps using ac_get_family_name. */
+const char *ac_get_gpu_display_name(const struct radeon_info *info);
 int ac_get_gs_table_depth(enum amd_gfx_level gfx_level, enum radeon_family family);
 void ac_get_raster_config(const struct radeon_info *info, uint32_t *raster_config_p,
                           uint32_t *raster_config_1_p, uint32_t *se_tile_repeat_p);

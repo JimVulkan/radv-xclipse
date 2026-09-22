@@ -28,6 +28,8 @@
 #include "amdgfxregs.h"
 #include "radv_logcat.h"
 #include "radv_xclipse_ctxinit.h"
+#include "util/os_time.h"
+#include "util/u_xclipse_prof.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -1984,7 +1986,10 @@ static VkResult
 radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    RADV_CPU_T0();
+   const int64_t xprof_t0 = u_xclipse_prof_active() ? os_time_get_nano() : 0;
    const VkResult r = radv_queue_submit_timed(vqueue, submission);
+   if (xprof_t0)
+      u_xclipse_prof_wait(U_XCLIPSE_WAIT_SUBMIT, os_time_get_nano() - xprof_t0);
    RADV_CPU_T1(RADV_CPU_SUBMIT);
    return r;
 }

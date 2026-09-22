@@ -534,6 +534,7 @@ static uint32_t
 ac_xclipse_etc2_img_format(enum pipe_format format)
 {
    switch (format) {
+   case PIPE_FORMAT_ETC1_RGB8:        /* ETC2's RGB decoder decodes ETC1 streams */
    case PIPE_FORMAT_ETC2_RGB8:        return 123;
    case PIPE_FORMAT_ETC2_SRGB8:       return 124;
    case PIPE_FORMAT_ETC2_RGBA8:       return 125;
@@ -546,6 +547,14 @@ ac_xclipse_etc2_img_format(enum pipe_format format)
    case PIPE_FORMAT_ETC2_SRGB8A1:     return 132;
    default:                           return 0;
    }
+}
+
+/* Whether the Xclipse texture unit samples this compressed format natively (ASTC LDR, ETC2/EAC). */
+bool
+ac_xclipse_native_texture_format(const struct radeon_info *info, enum pipe_format format)
+{
+   return info->gfx11_shader_core &&
+          (ac_xclipse_astc_img_format(format) || ac_xclipse_etc2_img_format(format));
 }
 
 static uint32_t

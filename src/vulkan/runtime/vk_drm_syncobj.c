@@ -208,16 +208,37 @@ vk_drm_syncobj_reset_many(struct vk_device *device,
    return VK_SUCCESS;
 }
 
+/* Wait until the syncobj has a fence -- not until it signals.
+ *
+ * On the binary wait ioctl WAIT_FOR_SUBMIT alone also waits for the fence to SIGNAL, so using it
+ * as a materialization check made every sync file export (one per present) wait for the GPU to
+ * finish. WAIT_AVAILABLE returns once the fence exists, and only the timeline ioctl takes it
+ * (point 0 is the binary payload). Kernels without it fall back to the full wait. */
+static int
+syncobj_wait_materialized(struct vk_device *device, uint32_t *handle, uint64_t abs_timeout_ns)
+{
+   if (device->sync->timeline_wait) {
+      uint64_t point = 0;
+      errno = 0;
+      int err = device->sync->timeline_wait(device->sync, handle, &point, 1, abs_timeout_ns,
+                                            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+                                               DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
+                                            NULL /* first_signaled */);
+      if (err != -EINVAL && err != -EOPNOTSUPP && errno != EINVAL && errno != EOPNOTSUPP)
+         return err;
+   }
+   return device->sync->wait(device->sync, handle, 1, abs_timeout_ns,
+                             DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL /* first_signaled */);
+}
+
 static VkResult
 sync_has_sync_file(struct vk_device *device, struct vk_sync *sync)
 {
    uint32_t handle = to_drm_syncobj(sync)->syncobj;
 
    /* Xclipse 920 (Samsung sgpu): exporting a sync file from an unmaterialized syncobj hard-locks
-    * the kernel, so probe materialization with a zero-time WAIT_FOR_SUBMIT wait instead. */
-   int err = device->sync->wait(device->sync, &handle, 1, 0 /* timeout */,
-                                DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
-                                NULL /* first_signaled */);
+    * the kernel, so probe materialization with a zero-time wait instead. */
+   int err = syncobj_wait_materialized(device, &handle, 0 /* timeout */);
    if (!err) {
       return VK_SUCCESS;
    } else if (errno == ETIME) {
@@ -426,8 +447,7 @@ vk_drm_syncobj_export_sync_file(struct vk_device *device,
     * timeout fail the export instead of exporting anyway. */
    {
       uint64_t abs_timeout_ns = os_time_get_absolute_timeout(5ull * 1000 * 1000 * 1000 /* 5s */);
-      int werr = device->sync->wait(device->sync, &sobj->syncobj, 1, abs_timeout_ns,
-                                    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
+      int werr = syncobj_wait_materialized(device, &sobj->syncobj, abs_timeout_ns);
       if (werr) {
          return vk_errorf(device, VK_ERROR_UNKNOWN,
                           "sync_file export refused: fence not materialized after 5s "

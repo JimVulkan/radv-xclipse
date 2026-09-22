@@ -748,13 +748,13 @@ ac_set_tracked_regs_to_clear_state(struct ac_tracked_regs *tracked_regs,
 void
 ac_cmdbuf_flush_vgt_streamout(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level);
 
-#ifdef __cplusplus
-}
-#endif
-
 /* Xclipse: a 32-bit pointer outside the address32_hi window (see ac_cmdbuf_emit_32bit_pointer). */
 void ac_xclipse_va32_violation(uint64_t va, uint32_t address32_hi);
 /* Xclipse 530: report register runs that TITAN's map splits (see ac_titan_check_run). */
 int ac_xclipse_runcheck(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

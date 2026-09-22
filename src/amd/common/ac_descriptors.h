@@ -280,6 +280,9 @@ struct ac_texture_state {
    uint32_t aniso_single_level : 1;
 };
 
+bool
+ac_xclipse_native_texture_format(const struct radeon_info *info, enum pipe_format format);
+
 void
 ac_build_texture_descriptor(const struct radeon_info *info,
                             const struct ac_texture_state *state,

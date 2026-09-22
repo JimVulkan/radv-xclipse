@@ -1,0 +1,16 @@
+--- a/amdgpu/handle_table.h	2026-09-21 13:25:53.602989400 +0200
++++ b/amdgpu/handle_table.h	2026-09-21 13:25:53.632988700 +0200
+@@ -25,6 +25,13 @@
+ #define _HANDLE_TABLE_H_
+ 
+ #include <stdint.h>
++
++/* Linked statically next to Mesa's gallium, whose u_handle_table.c defines a public
++ * handle_table_remove(): keep this copy's names apart. */
++#define handle_table_insert amdgpu_handle_table_insert
++#define handle_table_remove amdgpu_handle_table_remove
++#define handle_table_lookup amdgpu_handle_table_lookup
++#define handle_table_fini amdgpu_handle_table_fini
+ #include "libdrm_macros.h"
+ 
+ struct handle_table {

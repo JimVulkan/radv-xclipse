@@ -2145,7 +2145,8 @@ if not with_platform_windows and not dep_elf.found()
 endif
 if dep_elf.found()
   pre_args += '-DUSE_LIBELF'
-elif with_gallium_radeonsi and with_gfx_compute
+elif with_gallium_radeonsi and with_gfx_compute and amd_with_llvm
+  # Only LLVM emits ELF shader binaries; ACO binaries are raw (see ac_rtld_stub.c).
   error('Gallium driver radeonsi requires libelf')
 elif with_nouveau_vk
   error('NVK requires libelf')

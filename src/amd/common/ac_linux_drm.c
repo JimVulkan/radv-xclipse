@@ -12,6 +12,7 @@
 #include "util/u_sync_provider.h"
 #include "ac_gpu_info.h"
 #include <android/log.h>
+#include <errno.h>
 #include "drm-uapi/drm.h"
 
 #include <stdlib.h>
@@ -482,6 +483,20 @@ static int
 ac_drm_syncobj_wait_materialized(ac_drm_device *dev, uint32_t syncobj)
 {
    int64_t abs_timeout = (int64_t)os_time_get_absolute_timeout(5ull * 1000 * 1000 * 1000 /* 5s */);
+
+   /* WAIT_FOR_SUBMIT alone also waits for the fence to SIGNAL, which made every present wait for
+    * the GPU to finish the frame. WAIT_AVAILABLE returns once the fence exists; only the timeline
+    * wait ioctl takes it (point 0 = the binary payload). Kernels without timeline syncobjs fall
+    * back to the full wait. */
+   if (dev->p->timeline_wait) {
+      uint64_t point = 0;
+      int ret = dev->p->timeline_wait(dev->p, &syncobj, &point, 1, abs_timeout,
+                                      DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+                                         DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
+                                      NULL);
+      if (ret != -EINVAL && ret != -EOPNOTSUPP)
+         return ret;
+   }
    return dev->p->wait(dev->p, &syncobj, 1, abs_timeout,
                        DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
 }

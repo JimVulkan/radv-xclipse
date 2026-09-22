@@ -43,6 +43,7 @@
 #include "vk_sync.h"
 
 #include "aco_interface.h"
+#include "radv_xclipse_prof.h"
 
 static bool
 radv_trap_handler_enabled()
@@ -1379,6 +1380,7 @@ radv_create_winsys(struct radv_device *device)
 static void
 radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAllocator)
 {
+   radv_xprof_device_finish(device);
    radv_device_finish_utrace(device);
    radv_device_finish_perf_counter(device);
 
@@ -1729,6 +1731,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    if (device->vk.enabled_features.rayTracingPipelineShaderGroupHandleCaptureReplay) {
       device->capture_replay_arena_vas = _mesa_hash_table_u64_create(NULL);
    }
+
+   radv_xprof_device_init(device);
 
    *pDevice = radv_device_to_handle(device);
    return VK_SUCCESS;

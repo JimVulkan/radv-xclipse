@@ -6,6 +6,7 @@
  */
 
 #include "util/u_thread.h"
+#include "util/u_xclipse_prof.h"
 #include "util/perf/u_perfetto.h"
 
 #include "macros.h"
@@ -84,6 +85,9 @@ int u_thread_create(thrd_t *thrd, int (*routine)(void *), void *param)
     * that tracking mechanism.
     */
    sigdelset(&new_set, SIGSEGV);
+   /* The Xclipse field profiler samples every thread with SIGPROF. */
+   if (u_xclipse_prof_armed())
+      sigdelset(&new_set, SIGPROF);
    pthread_sigmask(SIG_BLOCK, &new_set, &saved_set);
    ret = thrd_create(thrd, thread_routine, paramp);
    pthread_sigmask(SIG_SETMASK, &saved_set, NULL);

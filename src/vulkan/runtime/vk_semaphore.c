@@ -25,6 +25,7 @@
 
 #include "util/os_time.h"
 #include "vk_xclipse_perf.h"
+#include "util/u_xclipse_prof.h"
 #include "util/perf/cpu_trace.h"
 
 #ifdef _WIN32
@@ -361,13 +362,16 @@ vk_common_WaitSemaphores(VkDevice _device,
 
    /* Perf accounting: timeline-semaphore waits are GPU waits too. */
    const bool xperf = vk_xclipse_perf_enabled();
-   const uint64_t xperf_t0 = xperf ? os_time_get_nano() : 0;
+   const bool xprof = u_xclipse_prof_active();
+   const uint64_t xperf_t0 = xperf || xprof ? os_time_get_nano() : 0;
 
    VkResult result = vk_sync_wait_many(device, wait_count, waits,
                                        wait_flags, abs_timeout_ns);
 
    if (xperf)
       vk_xclipse_perf_wait(os_time_get_nano() - xperf_t0);
+   if (xprof)
+      u_xclipse_prof_wait(U_XCLIPSE_WAIT_CLIENT_FENCE, os_time_get_nano() - xperf_t0);
 
    STACK_ARRAY_FINISH(waits);
 

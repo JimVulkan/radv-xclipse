@@ -1,8 +1,7 @@
 # RADV for Samsung Xclipse
 
 A port of Mesa's RADV Vulkan driver to Samsung Xclipse GPUs on Android, based on Mesa 26.2.3.
-The Xclipse 920 (Exynos 2200) is supported. The Xclipse 530 (Exynos 1480) is highly experimental
-and broken.
+The Xclipse 920 (Exynos 2200) and the Xclipse 530 (Exynos 1480) are supported.
 
 ## Requirements
 
@@ -44,11 +43,8 @@ emulators that load custom Vulkan drivers from a zip.
 
 ## Compatibility
 
-Currently, the driver fully works only on the Xclipse 920. As for other models, they're not
-compatible for now. There's partial compatibility for the Xclipse 530, but it's currently broken
-and in current development, and if you really want to try it, set `TITAN_EXPERIMENTAL=1` in any
-app that can set local environment variables (`adb shell setprop debug.radv_titan_experimental 1` 
-for the apps that can't set environment variables).
+The driver works on the Xclipse 920 and the Xclipse 530. Other Xclipse models are not compatible
+for now.
 
 ## Runtime switches
 
@@ -62,11 +58,14 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_uf` | `RADV_XCLIPSE_UF` | `1` restores the user fence on graphics submits |
 | `debug.radv_xclipse_mtype` | `RADV_XCLIPSE_MTYPE` | VA map MTYPE: `0` default, `3` upstream |
 | `debug.radv_xclipse_pal_heaps` | `RADV_XCLIPSE_PAL_HEAPS` | `0` restores the single memory heap |
+| `debug.radv_xclipse_dcc` | `RADV_XCLIPSE_DCC` | `0` turns off render target compression (DCC) |
+| `debug.mesa_xclipse_prof` | `MESA_XCLIPSE_PROF` | `<delay>,<seconds>` profiles CPU and GPU time per frame and per render pass, then writes `mesa_prof_<pid>.txt` to `MESA_XCLIPSE_PROF_DIR` or the app's `Android/data/<package>/files` |
 
 ## Disclaimer
 
 This project was developed with heavy use of AI tools. Every change is built and tested on a
-Galaxy S22 Ultra (SM-S908B, Xclipse 920) before it is published.
+Galaxy S22 Ultra (SM-S908B, Xclipse 920) and a Galaxy A55 (SM-A556B, Xclipse 530) before it is
+published.
 
 ## License
 

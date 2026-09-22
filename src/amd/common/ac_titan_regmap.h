@@ -29,11 +29,12 @@
 
 #include "sid.h"
 #include "ac_titan_kmap.h"
-int ac_xclipse_runcheck(void);
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+int ac_xclipse_runcheck(void);
 
 /* Set once at device init when the chip is CHIP_TITAN. A global because
  * __ac_cmdbuf_set_reg_seq() has no device pointer; assumes one GPU per process. */
@@ -66,10 +67,9 @@ extern bool ac_titan_regmap_suppress;
  * RADV_XCLIPSE_TITAN_CBEXT sweeps it. */
 extern int ac_titan_cb_ext_slot;
 
-/* Slot of TITAN's 9-dword per-MRT block that is CB_COLORi_VIEW, or -1 to skip it.
- * CB_COLORi_VIEW carries MIP_LEVEL; without it every write to a non-zero mip lands on level 0.
- * Slot 0 is BASE, 7 ATTRIB2, 8 ATTRIB3, so VIEW is one of 1..6: RADV_XCLIPSE_TITAN_CBVIEW=<slot>.
- * Default -1. */
+/* Non-zero: write CB_COLORi_VIEW (SLICE_START, SLICE_MAX, MIP_LEVEL; slot 1 of TITAN's 9-dword
+ * per-MRT block, from the kernel map and the vendor's stream). Without it every colour write
+ * lands on layer 0 of level 0. RADV_XCLIPSE_TITAN_CBVIEW=0 disables; default on. */
 extern int ac_titan_cb_view_slot;
 
 void ac_titan_regmap_set_level(uint32_t level);
@@ -93,6 +93,23 @@ ac_titan_kmap_level(void)
    }
    return (uint32_t)cached;
 }
+/* The hand-recovered map left GFX10_3's SH 0x087 (SPI_SHADER_PGM_RSRC3_GS) in place, and TITAN
+ * reads the geometry stage's address high half there, so RADV wrote va >> 40 to it. The kernel
+ * map moves 0x087 to TITAN's real RSRC3_GS (0x08a) and PGM_HI_ES to 0x087, so with SH space
+ * mapped that write sets the NGG stage's CU_EN to 0x80 and its WAVE_LIMIT to 0 on every draw,
+ * a register the vendor never writes. Only emitted without the kernel's SH map;
+ * RADV_XCLIPSE_TITAN_PGMHI=1 forces it back for A/B. */
+static inline bool
+ac_titan_legacy_pgm_hi(void)
+{
+   static int cached = -1;
+   if (cached < 0) {
+      const char *e = getenv("RADV_XCLIPSE_TITAN_PGMHI");
+      cached = (e && e[0]) ? (atoi(e) != 0) : (ac_titan_kmap_level() < 2);
+   }
+   return cached;
+}
+
 /* The DB block is mapped (level 10): three GFX10_3 writes that land on live TITAN registers are
  * gated at their emission sites. */
 static inline bool

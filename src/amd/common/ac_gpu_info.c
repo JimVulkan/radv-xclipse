@@ -1192,9 +1192,10 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
             RADV_LOGI("[XCLIPSE] TITAN cb_ext_slot=%d (from %s)", ac_titan_cb_ext_slot, csrc);
             const char *vsrc = "default";
             int vwant = xclipse_knob_int("RADV_XCLIPSE_TITAN_CBVIEW", "debug.radv_xclipse_titan_cbview", &vsrc);
-            /* Default off: emitting this register drops Super Mario 3D World from 37.9 to 1.5 fps at
-             * either candidate slot, though it fixes mips. 1 or 3 re-enable it for testing. */
-            ac_titan_cb_view_slot = vwant >= 0 ? vwant : 0;
+            /* Default on. It was off because writing it cost Super Mario 3D World 25x its frame
+             * rate; that was the write for MRT 2+ landing on other targets' INFO/CMASK/DCC_BASE
+             * through a double remap (see radv_cmd_buffer.c). 0 leaves it unwritten. */
+            ac_titan_cb_view_slot = vwant >= 0 ? vwant : 1;
             RADV_LOGI("[XCLIPSE] TITAN cb_view_slot=%d (from %s)", ac_titan_cb_view_slot, vsrc);
          }
          RADV_LOGI("[XCLIPSE] family -> CHIP_TITAN (%d), register remap LEVEL %d (from %s)",
@@ -2340,6 +2341,13 @@ void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t s
    uint_uuid[1] = info->pci.bus;
    uint_uuid[2] = info->pci.dev;
    uint_uuid[3] = info->pci.func;
+}
+
+const char *ac_get_gpu_display_name(const struct radeon_info *info)
+{
+   if (info->xclipse_model == AC_XCLIPSE_920 && info->family == CHIP_VANGOGH)
+      return "VANGOGHLITE";
+   return ac_get_family_name(info->family);
 }
 
 void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)

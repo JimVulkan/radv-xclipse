@@ -636,6 +636,13 @@ struct radv_cmd_buffer {
    struct util_dynarray ray_history;
 
    struct list_head msrtss_transients;
+
+   /* Xclipse field profiler (radv_xclipse_prof.c), 0 when not sampling: timestamp slot + 1 of this
+    * command buffer's busy span, and pass slot + 1 of the pass being recorded. */
+   uint32_t xprof_slot;
+   uint32_t xprof_pass;
+   uint32_t xprof_draws;
+   const struct radv_shader *xprof_ps;
 };
 
 struct radv_msrtss_transient {

@@ -224,6 +224,8 @@ if dep_elf.found()
     'ac_rtld.h',
     'ac_rgp_elf_object_pack.c',
   )
+else
+  amd_common_files += files('ac_rtld_stub.c')
 endif
 
 idep_amd_generated_headers = declare_dependency(
