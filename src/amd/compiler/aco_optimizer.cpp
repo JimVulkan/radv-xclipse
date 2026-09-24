@@ -764,9 +764,17 @@ alu_opt_info_is_valid(opt_ctx& ctx, alu_opt_info& info)
          info.opcode = aco_opcode::s_pack_lh_b32_b16;
       } else if (info.operands[0].extract[0].offset() == 2 &&
                  info.operands[1].extract[0].offset() == 0) {
-         if (ctx.program->gfx_level < GFX11) /* TODO try shifting constant */
+         if (ctx.program->gfx_level >= GFX11) {
+            info.opcode = aco_opcode::s_pack_hl_b32_b16;
+         } else if (info.operands[1].op.isConstant()) {
+            /* No s_pack_hl before GFX11, but a constant operand can be shifted
+             * into the high half in order to use s_pack_hh instead.
+             */
+            info.operands[1].op = Operand::c32(info.operands[1].op.constantValue() << 16);
+            info.opcode = aco_opcode::s_pack_hh_b32_b16;
+         } else {
             return false;
-         info.opcode = aco_opcode::s_pack_hl_b32_b16;
+         }
       }
       info.operands[0].extract[0] = SubdwordSel::dword;
       info.operands[1].extract[0] = SubdwordSel::dword;
@@ -2537,9 +2545,6 @@ extract_apply_extract(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 void
 label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
-   if (instr->isSMEM())
-      smem_combine(ctx, instr);
-
    for (unsigned i = 0; i < instr->operands.size(); i++) {
       if (!instr->operands[i].isTemp())
          continue;
@@ -2584,13 +2589,6 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
           * MUBUF accesses. */
          bool vaddr_prevent_overflow = swizzled && ctx.program->gfx_level < GFX9;
 
-         /* Bounds checking is different on GFX6-7:
-          * The constant offset that is encoded in the instruction
-          * is counted in the bounds checking, but the SGPR offset isn't.
-          * Keep using an SGPR even if it's constant.
-          */
-         bool keep_soffset = mubuf.idxen && ctx.program->gfx_level <= GFX7;
-
          uint32_t const_max = ctx.program->dev.buf_offset_max;
 
          if (mubuf.offen && mubuf.idxen && i == 1 &&
@@ -2610,8 +2608,7 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
             mubuf.offset += info.val;
             mubuf.offen = false;
             continue;
-         } else if (i == 2 && info.is_constant() && mubuf.offset + info.val <= const_max &&
-                    !keep_soffset) {
+         } else if (i == 2 && info.is_constant() && mubuf.offset + info.val <= const_max) {
             instr->operands[2] = Operand::c32(0);
             mubuf.offset += info.val;
             continue;
@@ -2624,8 +2621,7 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
             mubuf.offset += offset;
             continue;
          } else if (i == 2 && parse_base_offset(ctx, instr.get(), i, &base, &offset, true) &&
-                    base.regClass() == s1 && mubuf.offset + offset <= const_max && !swizzled &&
-                    !keep_soffset) {
+                    base.regClass() == s1 && mubuf.offset + offset <= const_max && !swizzled) {
             instr->operands[i].setTemp(base);
             mubuf.offset += offset;
             continue;
@@ -2696,6 +2692,9 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
          }
       }
    }
+
+   if (instr->isSMEM())
+      smem_combine(ctx, instr);
 
    /* SALU / VALU: propagate inline constants, temps, and imod */
    if (instr->isSALU() || instr->isVALU()) {

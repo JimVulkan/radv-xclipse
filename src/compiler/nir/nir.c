@@ -929,6 +929,10 @@ nir_cmat_call_op_params(nir_cmat_call_op op, nir_function *callee)
       return 3;
    case nir_cmat_call_op_reduce_2x2:
       return 5;
+   case nir_cmat_call_op_tensor_load:
+      return 5;
+   case nir_cmat_call_op_tensor_store:
+      return 4;
    }
    UNREACHABLE("Invalid cmat call op");
 }
@@ -1961,9 +1965,8 @@ nir_block_cf_tree_next(nir_block *block)
    if (cf_next)
       return nir_cf_node_cf_tree_first(cf_next);
 
-   /* parent might be NULL if this is an extracted cf node. */
    nir_cf_node *parent = block->cf_node.parent;
-   if (!parent || parent->type == nir_cf_node_function)
+   if (parent->type == nir_cf_node_function)
       return NULL;
 
    /* Is this the last block of a cf_node? Return the following block */

@@ -806,9 +806,6 @@ init_app_workarounds_entrypoints(struct radv_device *device, struct dispatch_tab
       SET_ENTRYPOINT(strange_brigade, CmdPipelineBarrier2);
    } else if (!strcmp(instance->drirc.debug.app_layer, "gfxbench5")) {
       SET_ENTRYPOINT(gfxbench5, CmdPipelineBarrier2);
-   } else if (!strcmp(instance->drirc.debug.app_layer, "ue5")) {
-      SET_ENTRYPOINT(ue5, CmdSetViewport);
-      SET_ENTRYPOINT(ue5, CmdSetScissor);
    }
 #undef SET_ENTRYPOINT
 
@@ -905,20 +902,6 @@ capture_trace(VkQueue _queue)
    }
 
    return result;
-}
-
-static VkResult
-radv_device_check_status(struct vk_device *_device)
-{
-   struct radv_device *device = container_of(_device, struct radv_device, vk);
-
-   /* VK_KHR_shader_abort requires the device to return VK_ERROR_DEVICE_LOST after any shader
-    * execute OpAbortKHR.
-    */
-   if (radv_shader_abort_occurred(device))
-      return vk_device_set_lost(&device->vk, "shader executed OpAbortKHR");
-
-   return VK_SUCCESS;
 }
 
 static void
@@ -1195,9 +1178,10 @@ radv_device_init_compiler_info(struct radv_device *device)
       nggc_max_ps_params = pdev->info.has_dedicated_vram ? 12 : 8;
    }
 
-   bool image_2d_view_of_3d = device->vk.enabled_features.image2DViewOf3D && pdev->info.gfx_level == GFX9;
-   bool mesh_shader_queries = device->vk.enabled_features.meshShaderQueries && pdev->emulate_mesh_shader_queries;
+   bool image_2d_view_of_3d = device->vk.enabled_features.image2DViewOf3D;
+   bool mesh_shader_queries = device->vk.enabled_features.meshShaderQueries;
    bool primitives_generated_query = radv_uses_primitives_generated_query(device);
+   struct vk_pipeline_robustness_state robustness_state = device->vk.robustness_state;
 
    /* The Vulkan spec says:
     *  "Binary shaders retrieved from a physical device with a certain shaderBinaryUUID are
@@ -1208,9 +1192,32 @@ radv_device_init_compiler_info(struct radv_device *device)
     * enabled, regardless of what features are actually enabled on the logical device.
     */
    if (device->vk.enabled_features.shaderObject) {
-      image_2d_view_of_3d = pdev->info.gfx_level == GFX9;
+      image_2d_view_of_3d = true;
+      mesh_shader_queries = true;
       primitives_generated_query = true;
+      robustness_state.storage_buffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2;
+      robustness_state.uniform_buffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2;
+      robustness_state.vertex_inputs = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2;
+      robustness_state.images = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2;
+      robustness_state.null_uniform_buffer_descriptor = true;
+      robustness_state.null_storage_buffer_descriptor = true;
    }
+
+   /* We also need to be careful to not use most device->vk.enabled_features in the
+    * radv_compiler_info. This is because Fossilize only tracks the features it considers relevant
+    * for shader compilation in order to share databases across devices (which may have different
+    * sets of supported features) and use them to fill shader caches. The Fossilize replayer enables
+    * all other features.
+    *
+    * The features Fossilize tracks include robustBufferAccess, robustImageAccess, robustness2
+    * features, shaderObject, image2DViewOf3D, meshShaderQueries and PrimitivesGeneratedQuery features.
+    *
+    * The situation is similar for extension enablement.
+    *
+    * VkPhysicalDeviceLineRasterizationFeatures::smoothLines is used below, but it's part of the pipeline
+    * key instead of the cache key, so cache misses only happen with applications which don't enable the
+    * feature and have pipelines which may enable smooth lines.
+    */
 
    /* See radeon_info::gfx11_shader_core: the shader core is GFX11 even though gfx_level is
     * GFX10_3, so the ISA must be compiled as GFX11. */
@@ -1239,13 +1246,12 @@ radv_device_init_compiler_info(struct radv_device *device)
             .load_grid_size_from_user_sgpr = pdev->load_grid_size_from_user_sgpr,
             .emulate_ngg_gs_query_pipeline_stat = pdev->emulate_ngg_gs_query_pipeline_stat,
             .primitives_generated_query = primitives_generated_query,
-            .mesh_shader_queries = mesh_shader_queries,
-            .image_2d_view_of_3d = image_2d_view_of_3d,
+            .mesh_shader_queries = mesh_shader_queries && pdev->emulate_mesh_shader_queries,
+            .image_2d_view_of_3d = image_2d_view_of_3d && pdev->info.gfx_level == GFX9,
             .use_fmask = pdev->use_fmask,
             .force_64_byte_sampled_image = pdev->force_64_byte_sampled_image,
             .robust_buffer_access = pdev->use_llvm && (device->vk.enabled_features.robustBufferAccess2 ||
                                                        device->vk.enabled_features.robustBufferAccess),
-            .coop_matrix_robust_buffer_access = false,
             .mitigate_smem_oob = pdev->info.compiler_info.has_smem_oob_access_bug &&
                                  !(instance->debug_flags & RADV_DEBUG_NO_SMEM_MITIGATION),
             .mitigate_smem_with_null_prt =
@@ -1322,8 +1328,8 @@ radv_device_init_compiler_info(struct radv_device *device)
       .buffer_descriptor_size = pdev->vk.properties.bufferDescriptorSize,
       .buffer_descriptor_alignment = pdev->vk.properties.bufferDescriptorAlignment,
       /* Shader features, included as part of the pipeline key */
-      .device_robustness_state = &device->vk.robustness_state,
-      .smooth_lines = device->vk.enabled_features.smoothLines,
+      .device_robustness_state = robustness_state,
+      .smooth_lines = device->vk.enabled_features.smoothLines, /* This is only used for pipeline objects. */
       .force_vrs_enabled = device->force_vrs_enabled,
       /* Wave/subgroup sizes */
       .subgroup_size = device->vk.physical->properties.subgroupSize,
@@ -1488,7 +1494,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    device->vk.get_timestamp = get_timestamp;
    device->vk.capture_trace = capture_trace;
-   device->vk.check_status = radv_device_check_status;
 
    device->vk.command_buffer_ops = &radv_cmd_buffer_ops;
 
@@ -2173,44 +2178,25 @@ radv_GetDeviceFaultReportsKHR(VkDevice _device, uint64_t timeout, uint32_t *pFau
    VK_OUTARRAY_MAKE_TYPED(VkDeviceFaultInfoKHR, out, pFaultInfo, pFaultCounts);
    VK_FROM_HANDLE(radv_device, device, _device);
    VkDeviceFaultAddressInfoKHR addr_fault_info;
-   bool device_fault_occurred = false;
-   bool shader_abort_occurred = false;
    bool vm_fault_occurred = false;
    bool timed_out = false;
 
    uint64_t abs_timeout = os_time_get_absolute_timeout(timeout);
    do {
       addr_fault_info = radv_get_device_fault_addr_info(device, &vm_fault_occurred);
-      shader_abort_occurred = radv_shader_abort_occurred(device);
+   } while (timeout > 0 && !vm_fault_occurred && !(timed_out = (abs_timeout < os_time_get_nano())));
 
-      device_fault_occurred = vm_fault_occurred || shader_abort_occurred;
-   } while (timeout > 0 && !device_fault_occurred && !(timed_out = (abs_timeout < os_time_get_nano())));
-
-   if (!device_fault_occurred)
+   if (!vm_fault_occurred)
       return VK_TIMEOUT;
 
-   if (vm_fault_occurred) {
-      VkDeviceFaultInfoKHR fault_info = {
-         .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_KHR,
-         .flags = VK_DEVICE_FAULT_FLAG_MEMORY_ADDRESS_KHR,
-         .faultAddressInfo = addr_fault_info,
-      };
-      strncpy(fault_info.description, "A GPUVM fault has been detected", sizeof(fault_info.description));
+   VkDeviceFaultInfoKHR fault_info = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_KHR,
+      .flags = VK_DEVICE_FAULT_FLAG_MEMORY_ADDRESS_KHR,
+      .faultAddressInfo = addr_fault_info,
+   };
+   strncpy(fault_info.description, "A GPUVM fault has been detected", sizeof(fault_info.description));
 
-      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem) *elem = fault_info;
-   }
-
-   if (shader_abort_occurred) {
-      /* The device lost entry must be last. */
-      VkDeviceFaultInfoKHR shader_abort_info = {
-         .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_KHR,
-         .flags = VK_DEVICE_FAULT_FLAG_DEVICE_LOST_KHR,
-      };
-      strncpy(shader_abort_info.description, "A device lost due to OpAbortKHR has been detected",
-              sizeof(shader_abort_info.description));
-
-      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem) *elem = shader_abort_info;
-   }
+   vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem) *elem = fault_info;
 
    return vk_outarray_status(&out);
 }

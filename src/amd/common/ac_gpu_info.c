@@ -174,6 +174,7 @@ ac_titan_regmap_set_level(uint32_t level)
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "util/os_misc.h"
+#include "util/format/u_format.h"
 
 #include <stdio.h>
 #include <ctype.h>
@@ -803,22 +804,24 @@ ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device
       info->ip[ip_type].ver_major = ip_info->hw_ip_version_major;
       info->ip[ip_type].ver_minor = ip_info->hw_ip_version_minor;
 
-      /* Fix incorrect IP versions reported by the kernel. */
-      if (device_info->family == FAMILY_NV &&
-            (ASICREV_IS(device_info->external_rev, NAVI10) ||
-            ASICREV_IS(device_info->external_rev, NAVI12) ||
-            ASICREV_IS(device_info->external_rev, NAVI14) ||
-            ASICREV_IS(device_info->external_rev, GFX1013)))
-         info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 1;
-      else if (device_info->family == FAMILY_NV ||
-               device_info->family == FAMILY_VGH ||
-               /* Samsung Xclipse 530: the sgpu kernel reports GFX 10.0 (FAMILY_MGFX); it is GFX10_3
-                * like the 920 (FAMILY_VGH). Without this gfx_level resolves to GFX10_1. */
-               device_info->family == FAMILY_MGFX ||
-               device_info->family == FAMILY_RMB ||
-               device_info->family == FAMILY_RPL ||
-               device_info->family == FAMILY_MDN)
-         info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 3;
+      if (ip_type == AMD_IP_GFX) {
+         /* Fix incorrect IP versions reported by the kernel. */
+         if (device_info->family == FAMILY_NV &&
+               (ASICREV_IS(device_info->external_rev, NAVI10) ||
+               ASICREV_IS(device_info->external_rev, NAVI12) ||
+               ASICREV_IS(device_info->external_rev, NAVI14) ||
+               ASICREV_IS(device_info->external_rev, GFX1013)))
+            info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 1;
+         else if (device_info->family == FAMILY_NV ||
+                  device_info->family == FAMILY_VGH ||
+                  /* Samsung Xclipse 530: the sgpu kernel reports GFX 10.0 (FAMILY_MGFX); it is
+                   * GFX10_3 like the 920 (FAMILY_VGH). Without this gfx_level resolves to GFX10_1. */
+                  device_info->family == FAMILY_MGFX ||
+                  device_info->family == FAMILY_RMB ||
+                  device_info->family == FAMILY_RPL ||
+                  device_info->family == FAMILY_MDN)
+            info->ip[AMD_IP_GFX].ver_minor = info->ip[AMD_IP_COMPUTE].ver_minor = 3;
+      }
    }
 
    /* GFX IP version override (RADV_XCLIPSE_GFXIP / debug.radv_xclipse_gfxip, as MMm: 100 = 10.0,
@@ -2343,6 +2346,32 @@ void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t s
    uint_uuid[3] = info->pci.func;
 }
 
+static void ac_print_gpu_modifiers(FILE *f, const struct radeon_info *const info,
+                                   const enum pipe_format format)
+{
+   const uint32_t bpp = util_format_get_blocksizebits(format);
+   struct ac_modifier_options modifier_options = {
+      .dcc = true,
+      .dcc_retile = true,
+   };
+   uint64_t modifiers[256];
+   unsigned modifier_count = ARRAY_SIZE(modifiers);
+
+   /* Get the number of modifiers. */
+   if (ac_get_supported_modifiers(info, &modifier_options, format,
+                                  &modifier_count, modifiers)) {
+      if (modifier_count)
+         fprintf(f, "Modifiers (%u bpp):\n", bpp);
+
+      for (unsigned i = 0; i < modifier_count; i++) {
+         char *name = drmGetFormatModifierName(modifiers[i]);
+
+         fprintf(f, "    0x%" PRIx64 " - %s\n", modifiers[i], name);
+         free(name);
+      }
+   }
+}
+
 const char *ac_get_gpu_display_name(const struct radeon_info *info)
 {
    if (info->xclipse_model == AC_XCLIPSE_920 && info->family == CHIP_VANGOGH)
@@ -2694,26 +2723,9 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
       fprintf(f, "    num_lower_pipes = %u (raw)\n", G_0098F8_NUM_LOWER_PIPES(info->gb_addr_config));
    }
 
-   struct ac_modifier_options modifier_options = {
-      .dcc = true,
-      .dcc_retile = true,
-   };
-   uint64_t modifiers[256];
-   unsigned modifier_count = ARRAY_SIZE(modifiers);
-
-   /* Get the number of modifiers. */
-   if (ac_get_supported_modifiers(info, &modifier_options, PIPE_FORMAT_R8G8B8A8_UNORM,
-                                  &modifier_count, modifiers)) {
-      if (modifier_count)
-         fprintf(f, "Modifiers (32bpp):\n");
-
-      for (unsigned i = 0; i < modifier_count; i++) {
-         char *name = drmGetFormatModifierName(modifiers[i]);
-
-         fprintf(f, "    %s\n", name);
-         free(name);
-      }
-   }
+   ac_print_gpu_modifiers(f, info, PIPE_FORMAT_R8G8_UNORM);
+   ac_print_gpu_modifiers(f, info, PIPE_FORMAT_R8G8B8A8_UNORM);
+   ac_print_gpu_modifiers(f, info, PIPE_FORMAT_R16G16B16A16_UNORM);
 }
 
 int ac_get_gs_table_depth(enum amd_gfx_level gfx_level, enum radeon_family family)

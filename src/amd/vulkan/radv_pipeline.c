@@ -125,14 +125,9 @@ radv_pipeline_get_shader_key(const struct radv_compiler_info *compiler_info,
       key.version = compiler_info->override_compute_shader_version;
    }
 
-   vk_pipeline_robustness_state_fill(compiler_info->device_robustness_state, &rs, pNext, stage->pNext);
+   vk_pipeline_robustness_state_fill(&compiler_info->device_robustness_state, &rs, pNext, stage->pNext);
 
    radv_set_stage_key_robustness(&rs, s, &key);
-
-   if (compiler_info->key.coop_matrix_robust_buffer_access) {
-      key.coop_matrix_storage_robustness = rs.storage_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED;
-      key.coop_matrix_uniform_robustness = rs.uniform_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED;
-   }
 
    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *const subgroup_size =
       vk_find_struct_const(stage->pNext, PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
@@ -172,8 +167,6 @@ radv_merge_shader_stage_key(struct radv_shader_stage_key *dst, const struct radv
    dst->storage_robustness2 |= src->storage_robustness2;
    dst->uniform_robustness2 |= src->uniform_robustness2;
    dst->vertex_robustness1 |= src->vertex_robustness1;
-   dst->coop_matrix_storage_robustness |= src->coop_matrix_storage_robustness;
-   dst->coop_matrix_uniform_robustness |= src->coop_matrix_uniform_robustness;
 
    dst->optimisations_disabled |= src->optimisations_disabled;
    dst->keep_statistic_info |= src->keep_statistic_info;
@@ -283,8 +276,10 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    radv_nir_opt_tid_function_options tid_options = {
       .use_masked_swizzle_amd = true,
       .use_dpp16_shift_amd = !use_llvm && gfx_level >= GFX8,
+      .use_quad_swap_broadcast = true,
       .use_clustered_rotate = !use_llvm,
-      .hw_subgroup_size = stage->info.wave_size,
+      .use_permute16_amd = !use_llvm && gfx_level >= GFX10,
+      .use_dpp8_swizzle_amd = !use_llvm && gfx_level >= GFX10,
       .hw_ballot_bit_size = stage->info.wave_size,
       .hw_ballot_num_comp = 1,
    };
@@ -355,7 +350,8 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
    NIR_PASS(_, stage->nir, ac_nir_lower_tex_coords,
             &(ac_nir_lower_tex_coords_options){
                .gfx_level = gfx_level,
-               .lower_array_layer_round_even = !compiler_info->ac->conformant_trunc_coord,
+               .lower_array_layer_round_even =
+                  !compiler_info->ac->conformant_trunc_coord && !compiler_info->key.disable_trunc_coord,
                .fix_derivs_in_divergent_cf = stage->stage == MESA_SHADER_FRAGMENT && !use_llvm,
                .max_wqm_vgprs = 64, // TODO: improve spiller and RA support for linear VGPRs
             });

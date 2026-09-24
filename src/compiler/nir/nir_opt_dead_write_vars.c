@@ -50,6 +50,7 @@ struct write_entry {
    nir_intrinsic_instr *intrin;
    nir_component_mask_t mask;
    nir_deref_instr *dst;
+   mesa_scope release_scope;
 };
 
 static void
@@ -65,7 +66,8 @@ static void
 clear_unused_for_read(struct util_dynarray *unused_writes, nir_deref_instr *src)
 {
    util_dynarray_foreach_reverse(unused_writes, struct write_entry, entry) {
-      if (nir_compare_derefs(src, entry->dst) & nir_derefs_may_alias_bit)
+      if ((entry->release_scope > SCOPE_INVOCATION && (entry->dst->modes & src->modes)) ||
+          (nir_compare_derefs(src, entry->dst) & nir_derefs_may_alias_bit))
          *entry = util_dynarray_pop(unused_writes, struct write_entry);
    }
 }
@@ -88,7 +90,7 @@ update_unused_writes(struct util_dynarray *unused_writes,
       nir_deref_compare_result comp = nir_compare_derefs(dst, entry->dst);
       if (comp & nir_derefs_a_contains_b_bit) {
          entry->mask &= ~mask;
-         if (entry->mask == 0) {
+         if (entry->mask == 0 && entry->release_scope <= SCOPE_INVOCATION) {
             nir_instr_remove(&entry->intrin->instr);
             *entry = util_dynarray_pop(unused_writes, struct write_entry);
             progress = true;
@@ -101,6 +103,7 @@ update_unused_writes(struct util_dynarray *unused_writes,
       .intrin = intrin,
       .mask = mask,
       .dst = dst,
+      .release_scope = SCOPE_NONE,
    };
 
    util_dynarray_append(unused_writes, new_entry);
@@ -165,9 +168,40 @@ remove_dead_write_vars_local(nir_shader *shader, nir_block *block,
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
       switch (intrin->intrinsic) {
       case nir_intrinsic_barrier: {
-         if (nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_RELEASE) {
-            clear_unused_for_modes(unused_writes,
-                                   nir_intrinsic_memory_modes(intrin));
+         const mesa_scope mem_scope = nir_intrinsic_memory_scope(intrin);
+         const mesa_scope exec_scope = nir_intrinsic_execution_scope(intrin);
+         const nir_memory_semantics sem = nir_intrinsic_memory_semantics(intrin);
+         const nir_variable_mode modes = nir_intrinsic_memory_modes(intrin);
+
+         if (sem & NIR_MEMORY_RELEASE) {
+            bool full_shared_barrier = (modes & nir_var_mem_shared) &&
+                                       (sem & NIR_MEMORY_ACQUIRE) &&
+                                       util_bitcount(sem & NIR_MEMORY_CONTROL_ARRIVE_WAIT) != 1 &&
+                                       (exec_scope >= mem_scope || exec_scope >= SCOPE_WORKGROUP);
+
+            /* Shared memory barriers mean that now we must consider cross
+             * invocation access - meaning nir_derefs_a_contains_b_bit can't be used
+             * for reads.
+             * When the next writes overwrite the entry, we can't remove it immediately,
+             * we must defer that decision until the next barrier with equal scope.
+             */
+            if (full_shared_barrier) {
+               clear_unused_for_modes(unused_writes, modes & ~nir_var_mem_shared);
+
+               util_dynarray_foreach_reverse(unused_writes, struct write_entry, entry) {
+                  if (nir_deref_mode_may_be(entry->dst, nir_var_mem_shared)) {
+                     if (entry->mask == 0 && entry->release_scope <= mem_scope) {
+                        nir_instr_remove(&entry->intrin->instr);
+                        *entry = util_dynarray_pop(unused_writes, struct write_entry);
+                        progress = true;
+                     } else {
+                        entry->release_scope = MAX2(entry->release_scope, mem_scope);
+                     }
+                  }
+               }
+            } else {
+               clear_unused_for_modes(unused_writes, modes);
+            }
          }
          break;
       }

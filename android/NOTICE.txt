@@ -1,9 +1,9 @@
 RADV for Samsung Xclipse -- third-party notices
 ===============================================
 
-vulkan.radeon.so is built from radv-xclipse, a subset of the Mesa 3D Graphics Library 26.2.1
-with changes by JimVulkan. The components below are compiled into it. Each is followed by its
-copyright holders; the license texts are at the end of this file.
+vulkan.radeon.so is built from radv-xclipse, a subset of the Mesa 3D Graphics Library
+26.3.0-devel with changes by JimVulkan. The components below are compiled into it. Each is
+followed by its copyright holders; the license texts are at the end of this file.
 
 Mesa 3D Graphics Library (RADV, ACO, NIR, the Vulkan runtime and utilities)
    Copyright the Mesa authors, as listed in each source file

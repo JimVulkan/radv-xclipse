@@ -11,6 +11,8 @@
 
 #include "drm-uapi/drm_fourcc.h"
 #include "util/log.h"
+#include <unistd.h>
+
 #include "util/macros.h"
 #include "util/u_memory.h"
 
@@ -179,6 +181,120 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
    return 0;
 }
 
+/*
+ * ARM's mali gralloc private handle, as the Exynos 9820 (Android 12) and 9611 (Android 13)
+ * allocators hand it out behind IMapper 2.x, which offers no layout query. Measured with
+ * probe/mali/ahbdump.c: indices are into native_handle_t::data[], fds included, 64-bit fields
+ * as low/high int pairs. The byte stride is the allocator's own (a 65x33 buffer is 80x48), and
+ * a linear buffer starts at offset 0 of the dma-buf, both confirmed by the vendor driver
+ * rendering into such a buffer and the pixels read back through the dma-buf (probe/mali/vkanb.c).
+ */
+#define ARM_GRALLOC_MAGIC        0x03141592
+/* Offsets from the magic, which is data[5] on the Exynos handles. MediaTek's allocator (Galaxy
+ * A31, MT6768, Android 12: 3 fds and 18 ints of its own first) puts the same ARM handle behind a
+ * prefix, magic at data[21], and has 6 more ints before plane_info. So the magic is searched for,
+ * and the plane-0 {byte stride, width, height} triple is taken from the first known offset where
+ * it is consistent with the buffer. */
+#define ARM_HND_WIDTH            2
+#define ARM_HND_HEIGHT           3
+#define ARM_HND_REQ_FORMAT       4
+static const int arm_hnd_plane0[] = {15 /* Exynos */, 21 /* MediaTek */};
+/* The u64 alloc format (HAL format low, AFBC and other layout bits from 32) sits 5 ints before
+ * plane_info on both: magic+10 on Exynos, magic+16 on MediaTek. */
+#define ARM_HND_ALLOC_FORMAT_BACK 5
+#define ARM_HND_PLANE_INTS       3  /* plane_info[3] of {byte stride, width, height} */
+#define ARM_HND_MIN_INTS         36
+#define ARM_ALLOC_FORMAT_AFBC    (1ull << 32)
+
+/* Returns -ENOENT when the handle is not an ARM gralloc handle. */
+static int
+arm_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
+                            struct u_gralloc_buffer_basic_info *out)
+{
+   const native_handle_t *handle = hnd->handle;
+
+   const int total = handle->numFds + handle->numInts;
+   if (total < ARM_HND_MIN_INTS)
+      return -ENOENT;
+
+   int m = handle->numFds;
+   while (m < total && (uint32_t)handle->data[m] != ARM_GRALLOC_MAGIC)
+      m++;
+   if (m + ARM_HND_MIN_INTS - 5 > total)
+      return -ENOENT;
+
+   const int *h = &handle->data[m];
+   const int format = h[ARM_HND_REQ_FORMAT];
+   const uint32_t width = h[ARM_HND_WIDTH];
+   const uint32_t height = h[ARM_HND_HEIGHT];
+   const uint32_t bpp = get_hal_format_bpp(format);
+
+   int plane0 = -1;
+   for (unsigned i = 0; i < ARRAY_SIZE(arm_hnd_plane0) && plane0 < 0; i++) {
+      const int o = arm_hnd_plane0[i];
+      if (m + o + 2 * ARM_HND_PLANE_INTS > total)
+         continue;
+      const uint32_t ps = h[o], pw = h[o + 1], ph = h[o + 2];
+      if (bpp && width && ps >= width * bpp && ps <= INT32_MAX && pw >= width && ph >= height &&
+          ps >= pw * bpp)
+         plane0 = o;
+   }
+   if (plane0 < 0) {
+      mesa_loge("ARM gralloc: no plane layout matches the handle (%ux%u, format 0x%x)", width,
+                height, format);
+      return -EINVAL;
+   }
+   const uint32_t stride = h[plane0];
+   const int af = plane0 - ARM_HND_ALLOC_FORMAT_BACK;
+   const uint64_t alloc_format =
+      (uint64_t)(uint32_t)h[af] | ((uint64_t)(uint32_t)h[af + 1] << 32);
+
+   if (is_hal_format_yuv(format) || h[plane0 + ARM_HND_PLANE_INTS]) {
+      mesa_loge("ARM gralloc: multi-planar format 0x%x is not handled", format);
+      return -EINVAL;
+   }
+
+   /* AFBC's header and body placement is the allocator's, and nothing here describes it, so a
+    * compressed buffer is refused rather than read as linear. Swapchain images avoid it by
+    * asking for MALI_GRALLOC_USAGE_NO_AFBC and composer usage (see the driver's swapchain
+    * gralloc usage). */
+   if (alloc_format & ARM_ALLOC_FORMAT_AFBC) {
+      mesa_loge("ARM gralloc: AFBC buffer (alloc format 0x%" PRIx64 ") is not handled",
+                alloc_format);
+      return -EINVAL;
+   }
+
+   const int drm_fourcc = get_fourcc_from_hal_format(format);
+   if (drm_fourcc == -1 || !bpp || !width || stride < width * bpp || stride > INT32_MAX) {
+      mesa_loge("ARM gralloc: inconsistent handle (format 0x%x, %ux%u, stride %u)", format,
+                width, height, stride);
+      return -EINVAL;
+   }
+
+   /* The buffer's dma-buf: the first fd big enough to hold it. Exynos puts it first; MediaTek's
+    * handle carries 3 fds and the first is not one (lseek gives no size). */
+   int fd = -1;
+   for (int i = 0; i < handle->numFds && fd < 0; i++) {
+      const off_t sz = lseek(handle->data[i], 0, SEEK_END);
+      lseek(handle->data[i], 0, SEEK_SET);
+      if (sz > 0 && (uint64_t)sz >= (uint64_t)stride * height)
+         fd = handle->data[i];
+   }
+   if (fd < 0) {
+      mesa_loge("ARM gralloc: no fd of the handle holds %u bytes", stride * height);
+      return -EINVAL;
+   }
+
+   out->drm_fourcc = drm_fourcc;
+   out->modifier = DRM_FORMAT_MOD_LINEAR;
+   out->num_planes = 1;
+   out->fds[0] = fd;
+   out->offsets[0] = 0;
+   out->strides[0] = stride;
+
+   return 0;
+}
+
 static int
 fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
                                  struct u_gralloc_buffer_handle *hnd,
@@ -196,6 +312,9 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
    if (sec_ret != -ENOENT)
       return sec_ret;
 #endif
+   int arm_ret = arm_gralloc_get_buffer_info(hnd, out);
+   if (arm_ret != -ENOENT)
+      return arm_ret;
 
    if (is_hal_format_yuv(hnd->hal_format)) {
       int ret = fallback_gralloc_get_yuv_info(gralloc, hnd, out);

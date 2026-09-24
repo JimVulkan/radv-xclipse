@@ -35,9 +35,6 @@ src4 = ('src', 4)
 
 class Index(object):
     def __init__(self, c_data_type, name, size):
-        # 64bit non struct types are possible, but intrinsics set/get
-        # need to be updated for that.
-        assert "struct" in c_data_type or size == 1
         self.c_data_type = c_data_type
         self.name = name
         self.size = size
@@ -344,6 +341,9 @@ index("unsigned", "resource_block_intel")
 # Various flags describing the resource access
 index("nir_resource_data_intel", "resource_access_intel")
 
+# Value for inactive lanes in select_active_intel
+index("uint64_t", "inactive_value", size = 2)
+
 # Register metadata
 # number of vector components
 index("unsigned", "num_components")
@@ -396,6 +396,9 @@ index("nir_preamble_class", "preamble_class")
 
 # Like nir_alu_instr::fp_math_ctrl, but for intrinsics
 index("unsigned", "fp_math_ctrl")
+
+# Whether to read multi component payload as vector elements
+index("bool", "vector_payload_intel")
 
 intrinsic("nop", flags=[CAN_ELIMINATE])
 
@@ -467,10 +470,6 @@ intrinsic("interp_deref_at_vertex", src_comp=[1, 1], dest_comp=0,
 
 # Gets the length of an unsized array at the end of a buffer
 intrinsic("deref_buffer_array_length", src_comp=[-1], dest_comp=1,
-          indices=[ACCESS], flags=[CAN_ELIMINATE, CAN_REORDER])
-
-# Gets the address of a buffer
-intrinsic("deref_buffer_address", src_comp=[-1], dest_comp=0,
           indices=[ACCESS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Gets the length of an unsized array
@@ -660,11 +659,17 @@ intrinsic("write_invocation_amd", src_comp=[0, 0, 1], dest_comp=0, bit_sizes=src
 intrinsic("mbcnt_amd", src_comp=[1, 1], dest_comp=1, bit_sizes=[32], flags=[CAN_REORDER, CAN_ELIMINATE])
 # Compiled to v_permlane16_b32. src = [ value, lanesel_lo, lanesel_hi ]
 intrinsic("lane_permute_16_amd", src_comp=[1, 1, 1], dest_comp=1, bit_sizes=src0, flags=SUBGROUP_FLAGS)
+# Compiled to v_permlanex16_b32. src = [ value, lanesel_lo, lanesel_hi ]
+intrinsic("lane_permute_x16_amd", src_comp=[1, 1, 1], dest_comp=1, bit_sizes=src0, flags=SUBGROUP_FLAGS)
 # subgroup shuffle up/down with cluster size 16.
 # base in [-15, -1]: DPP_ROW_SR
 # base in [  1, 15]: DPP_ROW_SL, otherwise invalid.
 # Returns zero for invocations that try to read out of bounds
 intrinsic("dpp16_shift_amd", src_comp=[0], dest_comp=0, bit_sizes=src0, indices=[BASE], flags=SUBGROUP_FLAGS)
+
+# Like quad_swizzle_amd, but in groups of 8
+intrinsic("dpp8_swizzle_amd", src_comp=[0], dest_comp=0, bit_sizes=src0,
+          indices=[SWIZZLE_MASK], flags=SUBGROUP_FLAGS)
 
 # Basic Geometry Shader intrinsics.
 #
@@ -1173,6 +1178,10 @@ intrinsic("load_use_sample_mask_in_amd", dest_comp=1, bit_sizes=[1],
 intrinsic("load_ps_iter_mask_amd", dest_comp=1, bit_sizes=[32],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# 0=sysval, 1=front, -1=back
+intrinsic("load_front_face_select_amd", dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Loads for gl_Color, for radeonsi which interpolates these in the shader
 # prolog to handle flatshading and front/back color selection without
 # recompiles and therefore doesn't handle them like normal varyings.
@@ -1325,7 +1334,7 @@ load("per_primitive_input", [1], [BASE, COMPONENT, DEST_TYPE, IO_SEMANTICS], [CA
 # src[] = { buffer_index, offset }.
 load("ssbo", [-1, 1], [ACCESS, ALIGN_MUL, ALIGN_OFFSET, OFFSET_SHIFT], [CAN_ELIMINATE])
 # src[] = { buffer_index, offset }
-load("ssbo_address", [-1, 1], [ACCESS], [CAN_ELIMINATE, CAN_REORDER])
+load("ssbo_address", [-1, 1], [], [CAN_ELIMINATE, CAN_REORDER])
 # src[] = { offset }.
 load("output", [1], [BASE, RANGE, COMPONENT, DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
 # src[] = { offset }.
@@ -1710,11 +1719,9 @@ intrinsic("prefetch_ubo_ir3", [1], flags=[CAN_REORDER])
 
 intrinsic("resbase_ir3", src_comp=[1], dest_comp=2, flags=[CAN_ELIMINATE, CAN_REORDER])
 
-# Panfrost-specific intrinsic for loading vertex attributes. Takes explicit
-# vertex and instance IDs which we need in order to implement vertex attribute
-# divisor with non-zero base instance on v9+.
-# src[] = { vertex_id, instance_id, offset }
-load("attribute_pan", [1, 1, 1], [BASE, COMPONENT, DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+# This maps directly to Mali's LOAD_ATTR[_IMM] instructions
+# src[] = { vertex_id, instance_id, handle }
+load("attr_pan", [1, 1, 1], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
 # src[] = { idx, bary }
 load("var_pan", [1, 2], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
@@ -1736,14 +1743,22 @@ intrinsic("load_var_special_pan", src_comp=[2], dest_comp=0, bit_sizes=[32],
 intrinsic("load_shader_output_pan", dest_comp=1, src_comp=[], bit_sizes=[32],
           indices=[], flags=[CAN_REORDER, CAN_ELIMINATE])
 
-# Panfrost-specific intrinsics for accessing the raw vertex ID and the
-# associated offset such that
-#   vertex_id = raw_vertex_id_pan + raw_vertex_offset_pan
-# The raw vertex ID differs from the zero-based vertex ID in that, in an index
-# draw, it is offset by the minimum vertex ID in the index buffer range
-# covered by the draw
-system_value("raw_vertex_id_pan", 1)
-system_value("raw_vertex_offset_pan", 1)
+# The hardware-native vertex ID and the associated offset such that
+#   vertex_id = raw_vertex_id + raw_vertex_offset
+# For a non-indexed draw the raw vertex ID is the zero-based position of the
+# vertex within the draw. How it differs from the zero-based vertex ID in an
+# indexed draw is hardware-specific, e.g. on Mali it is offset by the minimum
+# vertex ID in the index buffer range covered by the draw
+system_value("raw_vertex_id", 1)
+system_value("raw_vertex_offset", 1)
+
+# 4x4 cooperative matrix multiply-accumulate (MMUL). The matrices are spread
+# across the subgroup with one element (or packed group) per lane, so each
+# source is one 32-bit register per lane: src0 = A, src1 = B, src2 = C,
+# result = A * B + C. src_type is the multiplicand (A/B) type and selects the
+# MMUL variant: float32 -> f32, float16 -> v2f16, int8 -> v4s8, uint8 -> v4u8.
+intrinsic("cmat_muladd_pan", src_comp=[1, 1, 1], dest_comp=1, bit_sizes=[32],
+          indices=[SRC_TYPE], flags=SUBGROUP_FLAGS)
 
 # Intrinsics used by the Midgard/Bifrost blend pipeline. These are defined
 # within a blend shader to read/write the raw value from the tile buffer,
@@ -2693,9 +2708,13 @@ system_value("fs_z_c0_intel", 1, bit_sizes=[32])
 # Lower 16-bit has pixel X coord, upper 16-bit has pixel Y coord
 system_value("pixel_coord_intel", 1, bit_sizes=[32])
 
+# Loads the packed fixed-point sample position array as a i64vec2.
+system_value("sample_positions_intel", 2, bit_sizes=[64])
+
 # Read the attribute thread payload at a given byte offset
 # src[] = { offset }
-load("attribute_payload_intel", [1], flags=[CAN_ELIMINATE, CAN_REORDER])
+load("attribute_payload_intel", [1], indices=[VECTOR_PAYLOAD_INTEL],
+     flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Populate the per-primitive payload at an offset
 # src[] = { value, offset }
@@ -2731,6 +2750,26 @@ intrinsic("store_render_target_intel", [4, 4, 1, 1, 1, 1], indices=[TARGET], bit
 # Shuffle with an offset in bytes instead of a lane index.
 # src[] = { payload, lane offset in bytes }
 intrinsic("shuffle_intel", src_comp=[1, 1], dest_comp=0, bit_sizes=src0, flags=SUBGROUP_FLAGS)
+
+# NIR has vec16 but not vec32. Therefore, Jay's subgroup lowering uses opaque
+# convergent "handles" representing a convergent SIMD-width vector (vec32 for
+# SIMD32). read_handle_intel indexes into the underlying (potentially) vec32,
+# returning the vector (base, ..., base + dest_comp - 1).
+intrinsic("read_handle_intel", src_comp=[1], dest_comp=0, bit_sizes=src0,
+          flags=[CAN_ELIMINATE, CAN_REORDER], indices=[BASE])
+
+# Move a divergent value into a convergent SIMD-width vector represented as such
+# a handle. Active lanes are copied as-is. Inactive lanes are filled with the
+# specified inative-value. In other words, select based on the execution mask.
+# src[] = { data }
+intrinsic("select_active_intel", src_comp=[1], dest_comp=1, bit_sizes=src0,
+          flags=SUBGROUP_FLAGS, indices=[INACTIVE_VALUE])
+
+# Gather a SIMD-width convergent NIR vector (possibly split into two vec16
+# sources for SIMD32) and copies the active channels into a divergent NIR
+# definition. Inactive channels are undefined in the divergent result.
+intrinsic("gather_lanes_intel", src_comp=[0, 0], dest_comp=1, bit_sizes=src0,
+          flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # 1 component 32bit surface index that can be used for bindless or BTI heaps
 #
@@ -2943,6 +2982,14 @@ intrinsic("dpas_intel", dest_comp=0, src_comp=[0, -1, -1],
 intrinsic("convert_cmat_intel", dest_comp=0, src_comp=[-1],
           indices=[DST_CMAT_DESC, SRC_CMAT_DESC],
           flags=[CAN_ELIMINATE])
+
+# Counter intrinsic for divergent barrier workaround.
+#
+# Returns the value of the subgroup's local counter register and increments it
+# by BASE. The first source order invocation sets the initial value.
+# See brw_nir_lower_divergent_barriers for more details.
+intrinsic("subgroup_barrier_index_intel", dest_comp=1, src_comp=[],
+          bit_sizes=[32], indices=[BASE])
 
 # NVIDIA-specific intrinsics
 # src[] = { index, offset }.
@@ -3193,9 +3240,6 @@ intrinsic("dma_st_pco", src_comp=[0], indices=[FLAGS], bit_sizes=[32])
 
 # dma_st_tiled_pco(address_data, valid_mask)
 intrinsic("dma_st_tiled_pco", src_comp=[3, 1], bit_sizes=[32])
-
-# dma_flush_pco(address)
-intrinsic("dma_flush_pco", src_comp=[2], dest_comp=1, bit_sizes=[32])
 
 # load_tiled_offset_pco(component, is_store)
 intrinsic("load_tiled_offset_pco", dest_comp=1, indices=[COMPONENT, FLAGS], bit_sizes=[32])

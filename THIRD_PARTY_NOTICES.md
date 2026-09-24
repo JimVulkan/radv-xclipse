@@ -52,6 +52,12 @@ Text: `LICENSES/Apache-2.0.txt`
 - `include/android_stub/system/graphics.h`
 - `include/android_stub/vndk/hardware_buffer.h`
 - `include/android_stub/vndk/window.h`
+- `include/vulkan/vk_android_native_buffer.h`
+
+## Apache-2.0 OR MIT
+
+Text: `LICENSES/Apache-2.0.txt`, `LICENSES/MIT.txt`
+
 - `include/vk_video/vulkan_video_codec_av1std.h`
 - `include/vk_video/vulkan_video_codec_av1std_decode.h`
 - `include/vk_video/vulkan_video_codec_av1std_encode.h`
@@ -64,18 +70,12 @@ Text: `LICENSES/Apache-2.0.txt`
 - `include/vk_video/vulkan_video_codec_vp9std.h`
 - `include/vk_video/vulkan_video_codec_vp9std_decode.h`
 - `include/vk_video/vulkan_video_codecs_common.h`
-- `include/vulkan/vk_android_native_buffer.h`
 - `include/vulkan/vk_icd.h`
 - `include/vulkan/vk_layer.h`
 - `include/vulkan/vk_platform.h`
 - `include/vulkan/vulkan.h`
 - `include/vulkan/vulkan_android.h`
 - `include/vulkan/vulkan_core.h`
-
-## Apache-2.0 OR MIT
-
-Text: `LICENSES/Apache-2.0.txt`, `LICENSES/MIT.txt`
-
 - `src/vulkan/registry/vk.xml`
 
 ## BSD-2-Clause

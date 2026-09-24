@@ -199,6 +199,20 @@ vk_android_import_anb_memory(struct vk_device *device,
 
    int dma_buf_fd = anb->handle->data[0];
 
+   /* The dma-buf is not always the handle's first fd: MediaTek's ARM gralloc handle carries three
+    * and the buffer is the second. The gralloc backend that parsed the handle knows which. */
+   struct u_gralloc *gralloc = vk_android_get_ugralloc();
+   if (gralloc) {
+      struct u_gralloc_buffer_handle gr_handle = {
+         .handle = anb->handle,
+         .hal_format = anb->format,
+         .pixel_stride = anb->stride,
+      };
+      struct u_gralloc_buffer_basic_info info = {0};
+      if (u_gralloc_get_buffer_basic_info(gralloc, &gr_handle, &info) == 0 && info.fds[0] > 0)
+         dma_buf_fd = info.fds[0];
+   }
+
    /* Query image memory requirements for size and supported memory types */
    VkMemoryRequirements mem_reqs;
    device->dispatch_table.GetImageMemoryRequirements(
@@ -768,6 +782,14 @@ vk_image_usage_to_ahb_usage(const VkImageCreateFlags2KHR vk_create,
 
    if (vk_create & VK_IMAGE_CREATE_PROTECTED_BIT)
       ahb_usage |= AHARDWAREBUFFER_USAGE_PROTECTED_CONTENT;
+
+   /* XXX We need a better gralloc private query to forward the mutable bit
+    * along with the format list for a private vendor usage bit, and leave the
+    * decision to gralloc. For now, resolve mutable bit to CPU_WRITE_RARELY to
+    * implicitly force LINEAR.
+    */
+   if (vk_create & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
+      ahb_usage |= AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
 
    /* No usage bits set - set at least one GPU usage. */
    if (ahb_usage == 0)

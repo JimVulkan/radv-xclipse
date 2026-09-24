@@ -8,6 +8,14 @@
 		vk_icdGetPhysicalDeviceProcAddr;
 		vk_icdNegotiateLoaderICDInterfaceVersion;
 
+		# panvk on kbase: also the loader ICD entry points. The probes (probe/mali) and
+		# launchers that dlopen the driver look these up; every panvk build tested before the
+		# mali-panvk export had them, because that build tree lacked build-support/ and so
+		# linked without this version script at all.
+		vk_icdGetInstanceProcAddr;
+		vk_icdGetPhysicalDeviceProcAddr;
+		vk_icdNegotiateLoaderICDInterfaceVersion;
+
 	local:
 		# When static linking LLVM, all its symbols are public API.
 		# That may cause symbol collision, so explicitly demote everything.

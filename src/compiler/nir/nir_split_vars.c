@@ -323,6 +323,10 @@ split_struct_derefs_impl(nir_function_impl *impl,
             case nir_deref_type_var:
                assert(new_deref == NULL);
                new_deref = nir_build_deref_var(&b, split_var);
+               /* Keep the pointer width of the deref being replaced: a library compiled as a
+                * kernel has 64-bit derefs, while nir_build_deref_var picks 32 bits for any
+                * other stage, and the two must not be mixed in one shader. */
+               new_deref->def.bit_size = p->def.bit_size;
                break;
 
             case nir_deref_type_array:
@@ -883,6 +887,7 @@ split_array_access_impl(nir_function_impl *impl,
             assert(!split->splits && split->var);
 
             nir_deref_instr *new_deref = nir_build_deref_var(&b, split->var);
+            new_deref->def.bit_size = path.path[0]->def.bit_size;
             for (unsigned i = 0; i < info->num_levels; i++) {
                if (!info->levels[i].split) {
                   new_deref = nir_build_deref_follower(&b, new_deref,

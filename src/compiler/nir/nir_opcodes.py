@@ -722,6 +722,12 @@ if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
    dst = src0 + src1;
 }
 """)
+binop("fadd_rtne", tfloat, _2src_commutative + inexact_associative,"""
+dst = src0 + src1;
+""", description = """
+Used by lower_round_even in nir_lower_double_ops to correctly round regardless
+of the rounding mode set for the shader.
+""")
 binop("iadd", tint, _2src_commutative + associative, "(uint64_t)src0 + (uint64_t)src1")
 binop("iadd_sat", tint, _2src_commutative, """
       util_add_check_overflow({dest_type}, src0, src1) ?
@@ -1648,6 +1654,12 @@ float src0_f = get_float_source(src0_cv, execution_mode, 32);
 float src1_f = get_float_source(src1_cv, execution_mode, 32);
 dst = (src0_f > src1_f || isnan(src1_f)) ? src0 : src1;
 """, valid_fp_math_ctrl = preserve_inf + preserve_nan)
+
+# Intel multiply-adds
+triop("imad_32x16_intel", tint32, "", "(src0 * (int16_t) src1) + src2",
+      description = "Multiply 32-bits with low 16-bits, with sign extension, then add a 32-bit value")
+triop("umad_32x16_intel", tuint32, "", "(src0 * (uint16_t) src1) + src2",
+      description = "Multiply 32-bits with low 16-bits, with zero extension, then add a 32-bit value")
 
 # NVIDIA PRMT
 opcode("prmt_nv", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32],

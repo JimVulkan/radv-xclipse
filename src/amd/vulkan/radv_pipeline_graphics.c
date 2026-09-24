@@ -741,6 +741,10 @@ radv_pipeline_init_vertex_input_state(const struct radv_device *device, struct r
          dynamic->vertex_input.bindings[i] = binding;
          dynamic->vertex_input.bindings_match_attrib &= binding == i;
 
+         if (state->vi->bindings[binding].stride) {
+            dynamic->vertex_input.attrib_index_offset[i] = offset / state->vi->bindings[binding].stride;
+         }
+
          if (state->vi->bindings[binding].input_rate) {
             dynamic->vertex_input.instance_rate_inputs |= BITFIELD_BIT(i);
             dynamic->vertex_input.divisors[i] = state->vi->bindings[binding].divisor;
@@ -1321,6 +1325,8 @@ radv_graphics_shaders_fill_linked_io_info(struct radv_shader_stage *producer_sta
 static void
 radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_gfx_level gfx_level)
 {
+   bool fs_layer_lowered_to_input = false;
+
    /* Prepare shaders before running nir_opt_varyings. */
    for (int i = 0; i < ARRAY_SIZE(graphics_shader_order); ++i) {
       const mesa_shader_stage s = graphics_shader_order[i];
@@ -1337,6 +1343,14 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
 
       /* Update load/store alignments because inter-stage code motion may move instructions used to deduce this info. */
       NIR_PASS(_, shader, nir_opt_load_store_update_alignments);
+
+      if (s == MESA_SHADER_FRAGMENT) {
+         /* LAYER_ID must be an input to be optimizable by nir_opt_varyings.
+          * PRIMITIVE_ID too, but that's already an input.
+          */
+         NIR_PASS(fs_layer_lowered_to_input, shader, nir_lower_sysvals_to_varyings,
+                  &(nir_lower_sysvals_to_varyings_options){.layer_id = true});
+      }
    }
 
    int highest_changed_producer = -1;
@@ -1402,6 +1416,9 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
          continue;
 
       nir_shader *shader = stages[s].nir;
+
+      if (shader->info.stage == MESA_SHADER_FRAGMENT && fs_layer_lowered_to_input)
+         NIR_PASS(_, shader, nir_lower_system_values);
 
       /* Re-vectorize I/O for stages that use memory for I/O (LDS or VRAM).
        * Don't vectorize FS I/O, doing so just regresses shader stats without any benefit.
@@ -1642,6 +1659,22 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
          key.vi.vertex_attribute_offsets[i] = offset;
          key.vi.instance_rate_divisors[i] = state->vi->bindings[binding].divisor;
 
+         /* vertex_attribute_strides is only needed to workaround GFX6/7 offset>=stride checks. */
+         if (!BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_VI_BINDING_STRIDES) && compiler_info->ac->gfx_level < GFX8) {
+            /* From the Vulkan spec 1.2.157:
+             *
+             * "If the bound pipeline state object was created with the
+             * VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE dynamic state enabled then pStrides[i]
+             * specifies the distance in bytes between two consecutive elements within the
+             * corresponding buffer. In this case the VkVertexInputBindingDescription::stride state
+             * from the pipeline state object is ignored."
+             *
+             * Make sure the vertex attribute stride is zero to avoid computing a wrong offset if
+             * it's initialized to something else than zero.
+             */
+            key.vi.vertex_attribute_strides[i] = state->vi->bindings[binding].stride;
+         }
+
          if (state->vi->bindings[binding].input_rate) {
             key.vi.instance_rate_inputs |= 1u << i;
          }
@@ -1779,29 +1812,9 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
          (ngg_stage == VK_SHADER_STAGE_VERTEX_BIT || ngg_stage == VK_SHADER_STAGE_GEOMETRY_BIT);
    }
 
-   if (!BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY) && state->ia &&
-       state->ia->primitive_topology != VK_PRIMITIVE_TOPOLOGY_POINT_LIST &&
-       !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_POLYGON_MODE) && state->rs &&
-       state->rs->polygon_mode != VK_POLYGON_MODE_POINT) {
-      key.enable_remove_point_size = true;
-   }
-
-   if (compiler_info->smooth_lines) {
-      /* Make the line rasterization mode dynamic for smooth lines to conditionally enable the lowering at draw time.
-       * This is because it's not possible to know if the graphics pipeline will draw lines at this point and it also
-       * simplifies the implementation.
-       */
-      if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_LINE_MODE) ||
-          (state->rs && state->rs->line.mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH))
-         key.dynamic_line_rast_mode = true;
-
-      /* For GPL, when the fragment shader is compiled without any pre-rasterization information,
-       * ensure the line rasterization mode is considered dynamic because we can't know if it's
-       * going to draw lines or not.
-       */
-      key.dynamic_line_rast_mode |= !!(lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) &&
-                                    !(lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
-   }
+   key.smooth_lines_may_be_enabled =
+      compiler_info->smooth_lines && (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_LINE_MODE) || !state->rs ||
+                                      state->rs->line.mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH);
 
    key.dcc_decompress_gfx11 =
       compiler_info->ac->gfx_level >= GFX11 && custom_blend_mode == V_028808_CB_DCC_DECOMPRESS_GFX11;
@@ -2531,9 +2544,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       merge_tess_info(&stages[MESA_SHADER_TESS_EVAL].nir->info, &stages[MESA_SHADER_TESS_CTRL].nir->info);
    }
 
-   if (stages[MESA_SHADER_FRAGMENT].nir) {
-      unsigned num_raster_vertices_per_prim = radv_get_num_raster_vertices_per_prim(stages, gfx_state);
+   unsigned num_raster_vertices_per_prim = radv_get_num_raster_vertices_per_prim(stages, gfx_state);
 
+   if (stages[MESA_SHADER_FRAGMENT].nir) {
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_fs_barycentric, gfx_state,
                num_raster_vertices_per_prim);
 
@@ -2647,7 +2660,17 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
    }
 
    if (stages[MESA_SHADER_FRAGMENT].nir) {
-      if (gfx_state->dynamic_line_rast_mode)
+      /* Inter-shader code motion in nir_opt_varyings only works with FS inputs that are loaded only once,
+       * so move all input loads to the entry block, so that CSE can deduplicate them, which increases
+       * the likelihood of there being only one load per FS input component.
+       *
+       * This only moves FS input loads to the end of the entry block.
+       */
+      NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_move_to_top,
+               nir_move_to_entry_block_only | nir_move_to_top_input_loads_simple);
+
+      if ((!num_raster_vertices_per_prim || num_raster_vertices_per_prim == 2) &&
+          gfx_state->smooth_lines_may_be_enabled)
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_lower_poly_line_smooth, RADV_NUM_SMOOTH_AA_SAMPLES);
 
       if (!gfx_state->ps.has_epilog) {
@@ -2700,7 +2723,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       if (i != MESA_SHADER_MESH && radv_should_export_multiview(&stages[i], gfx_state))
          NIR_PASS(_, stages[i].nir, radv_nir_export_multiview);
 
-      uint64_t remove_as_varying = 0;
+      uint64_t remove_as_varying = VARYING_BIT_PSIZ | VARYING_BIT_LAYER;
       uint64_t remove_as_sysval = 0;
 
       /* Remove all varyings when the fragment shader is a noop. */
@@ -2710,15 +2733,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       /* Remove PSIZ from shaders when it's not needed.
        * This is typically produced by translation layers like Zink or d3d9 DXVK.
        */
-      if (gfx_state->enable_remove_point_size && (i != MESA_SHADER_TESS_EVAL || !stages[i].nir->info.tess.point_mode) &&
-          (i != MESA_SHADER_GEOMETRY || stages[i].nir->info.gs.output_primitive != MESA_PRIM_POINTS) &&
-          (i != MESA_SHADER_MESH || stages[i].nir->info.mesh.primitive_type != MESA_PRIM_POINTS)) {
-         remove_as_varying |= VARYING_BIT_PSIZ;
+      if (num_raster_vertices_per_prim > 1)
          remove_as_sysval |= VARYING_BIT_PSIZ;
-      }
-
-      if (!remove_as_varying && !remove_as_sysval)
-         continue;
 
       NIR_PASS(_, stages[i].nir, nir_remove_outputs, MESA_SHADER_FRAGMENT, remove_as_varying, remove_as_sysval);
       break;
@@ -2797,12 +2813,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
             stages[i].nir->info.outputs_written &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
             stages[i].nir->info.per_primitive_outputs &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
          }
-      } else if (fs_stage && fs_stage->info.ps.disallow_force_vrs_per_vertex && stages[i].info.force_vrs_per_vertex) {
+      } else if (fs_stage && fs_stage->info.ps.disallow_force_vrs_per_vertex) {
          stages[i].info.force_vrs_per_vertex = false;
-         stages[i].info.outinfo.writes_primitive_shading_rate = false;
-
-         assert(!(stages[i].nir->info.outputs_written & ~stages[i].nir->info.per_primitive_outputs &
-                  VARYING_BIT_PRIMITIVE_SHADING_RATE));
       }
       break;
    }

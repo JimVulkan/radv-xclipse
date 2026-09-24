@@ -256,7 +256,8 @@ nir_vprintf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, va_list 
                                 info.num_args);
       info.arg_sizes[info.num_args - 1] = arg_size;
 
-      args_size += arg_size;
+      /* Match u_printf, which 4-aligns the read cursor after each argument. */
+      args_size = align(args_size + arg_size, 4);
    }
    va_end(ap);
 
@@ -270,7 +271,7 @@ nir_vprintf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, va_list 
 
    uint32_t total_size = sizeof(uint32_t); /* identifier */
    for (unsigned a = 0; a < info.num_args; a++)
-      total_size += info.arg_sizes[a];
+      total_size = align(total_size + info.arg_sizes[a], 4);
 
    nir_push_if(b, nir_ilt(b, nir_iadd_imm(b, buffer_offset, total_size),
                           nir_load_printf_buffer_size(b)));
@@ -289,7 +290,7 @@ nir_vprintf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, va_list 
          nir_store_global(b, def, nir_iadd_imm(b, store_addr, store_offset),
                           .align_mul = 4);
 
-         store_offset += info.arg_sizes[a];
+         store_offset = align(store_offset + info.arg_sizes[a], 4);
       }
       va_end(ap);
    }

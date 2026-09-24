@@ -425,11 +425,9 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       replacement = nir_ine_imm(b, sample_coverage, 0);
       break;
    }
-   case nir_intrinsic_load_poly_line_smooth_enabled: {
-      nir_def *line_rast_mode = GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_LINE_RAST_MODE);
-      replacement = nir_ieq_imm(b, line_rast_mode, VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH);
+   case nir_intrinsic_load_poly_line_smooth_enabled:
+      replacement = nir_ieq_imm(b, GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_SMOOTH_LINES), 1);
       break;
-   }
    case nir_intrinsic_load_initial_edgeflags_amd:
       replacement = nir_imm_int(b, 0);
       break;
@@ -451,6 +449,11 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       break;
    case nir_intrinsic_load_use_sample_mask_in_amd:
       replacement = nir_ine_imm(b, GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_USE_SAMPLE_MASK_IN), 0);
+      break;
+   case nir_intrinsic_load_front_face_select_amd:
+      /* Extract it manually because GET_SGPR_FIELD_NIR doesn't sign-extend. */
+      replacement =
+         nir_ishr_imm(b, ac_nir_load_arg(b, &s->args->ac, s->args->ps_state), PS_STATE_FRONT_FACE_SELECT__SHIFT);
       break;
    default:
       progress = false;

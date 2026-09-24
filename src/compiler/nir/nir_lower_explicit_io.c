@@ -1395,8 +1395,7 @@ static unsigned
 get_max_shift(nir_intrinsic_instr *intrin,
               const nir_shader_compiler_options *options)
 {
-   if (intrin->intrinsic != nir_intrinsic_deref_buffer_address &&
-       options->max_offset_shift) {
+   if (options->max_offset_shift) {
       return options->max_offset_shift(intrin, options->cb_data);
    }
 
@@ -1444,21 +1443,6 @@ nir_lower_explicit_io_instr(nir_builder *b,
                             nir_address_format addr_format)
 {
    b->cursor = nir_after_instr(&intrin->instr);
-
-   if (intrin->intrinsic == nir_intrinsic_deref_buffer_address) {
-      nir_io_offset addr = build_addr(b, intrin, base_addr, addr_format, 0, 1, 0);
-      if (addr_format_is_global(addr_format, nir_var_mem_ssbo)) {
-         nir_def_replace(&intrin->def, addr_to_global(b, addr.def, addr_format));
-      } else {
-         nir_def *index = addr_to_index(b, addr.def, addr_format);
-         nir_def *offset = addr_to_offset(b, addr.def, addr_format);
-         nir_def *res = nir_load_ssbo_address(b, intrin->def.num_components,
-                                              intrin->def.bit_size, index, offset,
-                                              .access = nir_intrinsic_access(intrin));
-         nir_def_replace(&intrin->def, res);
-      }
-      return;
-   }
 
    nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
    unsigned vec_stride = glsl_get_explicit_stride(deref->type);
@@ -1836,8 +1820,7 @@ nir_lower_explicit_io_impl(nir_function_impl *impl, nir_variable_mode modes,
             case nir_intrinsic_store_deref_block_intel:
             case nir_intrinsic_load_deref_transpose_amd:
             case nir_intrinsic_deref_atomic:
-            case nir_intrinsic_deref_atomic_swap:
-            case nir_intrinsic_deref_buffer_address: {
+            case nir_intrinsic_deref_atomic_swap: {
                nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
                if (nir_deref_mode_is_in_set(deref, modes)) {
                   lower_explicit_io_access(&b, intrin, addr_format);
@@ -2118,7 +2101,7 @@ nir_assign_shared_var_locations(nir_shader *shader, glsl_type_size_align_func ty
       /* Per SPV_KHR_workgroup_storage_explicit_layout, if one shared variable is
        * a Block, all of them will be and Blocks are explicitly laid out.
        */
-      assert(glsl_type_is_interface(var->type));
+      assert(var->data.how_declared == nir_var_hidden || glsl_type_is_interface(var->type));
 
       if (var->data.aliased_shared_memory) {
          const bool align_to_stride = false;

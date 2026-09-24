@@ -3059,9 +3059,6 @@ vk_video_encode_av1_seq_hdr(const struct vk_video_session_parameters *params,
    /* AV1 does not need start code prevention */
    enc.prevent_start_code = false;
 
-   if (!color || (num_op_points > 0 && !op_points))
-      return VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR;
-
    emit_obu_av1_header(&enc, OBU_SEQUENCE_HEADER, obu_extension_flag, temporal_id, spatial_id);
 
    /* obu_size, use two bytes for header, the size will be written in afterwards */
@@ -3084,9 +3081,6 @@ vk_video_encode_av1_seq_hdr(const struct vk_video_session_parameters *params,
       vl_bitstream_put_bits(&enc, 1, seq_hdr->flags.timing_info_present_flag);
 
       if (seq_hdr->flags.timing_info_present_flag) {
-         if (!timing_info)
-            return VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR;
-
          /*  num_units_in_display_tick  */
          vl_bitstream_put_bits(&enc, 32, timing_info->num_units_in_display_tick);
          /*  time_scale  */

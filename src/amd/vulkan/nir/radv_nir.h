@@ -83,8 +83,7 @@ void radv_nir_lower_io(nir_shader *nir);
 
 bool radv_nir_lower_io_to_mem(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stage);
 
-bool radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_level,
-                                       struct radv_shader_stage *stage, unsigned wave_size);
+bool radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_level, unsigned wave_size);
 
 bool radv_nir_opt_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_level);
 
@@ -101,11 +100,13 @@ typedef struct radv_nir_opt_tid_function_options {
    bool use_masked_swizzle_amd : 1;
    bool use_dpp16_shift_amd : 1;
    bool use_shuffle_xor : 1;
+   bool use_quad_swap_broadcast : 1;
    bool use_clustered_rotate : 1;
-   /* The can be smaller than the api subgroup/ballot size
+   bool use_permute16_amd : 1;
+   bool use_dpp8_swizzle_amd : 1;
+   /* These can be smaller than the api ballot size
     * if some invocations are always inactive.
     */
-   uint8_t hw_subgroup_size;
    uint8_t hw_ballot_bit_size;
    uint8_t hw_ballot_num_comp;
 } radv_nir_opt_tid_function_options;

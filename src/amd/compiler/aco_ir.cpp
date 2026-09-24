@@ -72,11 +72,16 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    program->gfx_level = options->gfx_level;
    /* Xclipse 920: GFX11 ISA, but the SX/CB consuming exports is GFX10.3 and wants the VM/COMPR bits.
     * A real GFX11 part is never CHIP_VANGOGH. */
+   const bool xclipse_920 = options->gfx_level >= GFX11 && options->family == CHIP_VANGOGH;
+   /* The Xclipse 530 (CHIP_TITAN) needs the export encoding too: without the VM bit the DB never
+    * learns which pixels a shader discarded, and they write depth (cutout grass hiding the water
+    * behind it). The other three are the 920's alone; the 530 runs geometry and textureGrad fine
+    * without them. */
    program->gfx10_export_encoding =
-      options->gfx_level >= GFX11 && options->family == CHIP_VANGOGH;
-   program->gfx10_4_fmask = program->gfx10_export_encoding; /* same Xclipse 920 condition */
-   program->gfx10_sendmsg = program->gfx10_export_encoding; /* same Xclipse 920 condition */
-   program->gfx10_nsa = program->gfx10_export_encoding;     /* same Xclipse 920 condition */
+      xclipse_920 || (options->gfx_level >= GFX11 && options->family == CHIP_TITAN);
+   program->gfx10_4_fmask = xclipse_920;
+   program->gfx10_sendmsg = xclipse_920;
+   program->gfx10_nsa = xclipse_920;
    program->wave_size = info->wave_size;
    program->lane_mask = program->wave_size == 32 ? s1 : s2;
    program->preserve_s2 = info->vs.preserve_s2;

@@ -1143,6 +1143,9 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
          VIDEO_CODEC_H265ENC && pdev->video_encode_enabled && pdev->info.video_caps.enc[AC_VIDEO_CODEC_HEVC].supported,
       .KHR_video_encode_av1 =
          VIDEO_CODEC_AV1ENC && pdev->video_encode_enabled && pdev->info.video_caps.enc[AC_VIDEO_CODEC_AV1].supported,
+      .KHR_video_encode_feedback2 = pdev->video_encode_enabled &&
+                                    pdev->info.video_caps.enc[AC_VIDEO_CODEC_AVC].feedback.avg_qp &&
+                                    pdev->info.video_caps.enc[AC_VIDEO_CODEC_AVC].feedback.partition_count,
       .KHR_video_encode_intra_refresh = pdev->video_encode_enabled,
       .KHR_video_encode_quantization_map =
          pdev->video_encode_enabled && pdev->info.video_caps.enc[AC_VIDEO_CODEC_AVC].qp_map,
@@ -1908,6 +1911,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .cooperativeMatrixFlexibleDimensions = true,
       .cooperativeMatrixReductions = true,
       .cooperativeMatrixPerElementOperations = true,
+      .cooperativeMatrixTensorAddressing = true,
+      .cooperativeMatrixBlockLoads = true,
 
       /* VK_KHR_video_encode_av1 */
       .videoEncodeAV1 = true,
@@ -1919,6 +1924,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* VK_KHR_present_wait2 */
       .presentWait2 = true,
 #endif
+
+      /* VK_KHR_video_encode_feedback2 */
+      .videoEncodeFeedback2 = true,
 
       /* VK_KHR_video_encode_intra_refresh */
       .videoEncodeIntraRefresh = true,
@@ -3451,7 +3459,8 @@ radv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, ui
          }
          case VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR: {
             VkQueueFamilyQueryResultStatusPropertiesKHR *prop = (VkQueueFamilyQueryResultStatusPropertiesKHR *)ext;
-            prop->queryResultStatusSupport = VK_FALSE;
+            prop->queryResultStatusSupport =
+               pQueueFamilyProperties[i].queueFamilyProperties.queueFlags & VK_QUEUE_VIDEO_ENCODE_BIT_KHR;
             break;
          }
          case VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR: {

@@ -17,3 +17,8 @@ dEQP-VK.pipeline.*.sampler.*_compute
 
 # These tests cause segmentation fault: https://github.com/KhronosGroup/VK-GL-CTS/issues/603
 dEQP-VK.api.image_compression_control.swapchain.direct.*
+
+# Skip these two RT tests on all generations (although only RDNA2 GPUs seem to
+# hang) until the issue is resolved: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/16027
+dEQP-VK.ray_tracing_pipeline.misc.maxrtinvocations_AABB
+dEQP-VK.ray_tracing_pipeline.misc.maxrtinvocations_tri

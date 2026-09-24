@@ -198,6 +198,10 @@ set_io_mask(nir_shader *shader, nir_variable *var, int offset, int len,
             }
          }
 
+         if (shader->info.stage == MESA_SHADER_FRAGMENT &&
+             !is_output_read && var->data.index == 1)
+            shader->info.fs.color_is_dual_source = true;
+
          if (var->data.per_view)
             shader->info.per_view_outputs |= bitfield;
       }
@@ -555,7 +559,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
    case nir_intrinsic_load_input_vertex:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_per_primitive_input:
-   case nir_intrinsic_load_attribute_pan:
+   case nir_intrinsic_load_attr_pan:
       if (shader->info.stage == MESA_SHADER_TESS_EVAL &&
           instr->intrinsic == nir_intrinsic_load_input &&
           !is_patch_special) {
@@ -946,7 +950,6 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
           instr->intrinsic == nir_intrinsic_bindless_image_samples ||
           instr->intrinsic == nir_intrinsic_get_ubo_size ||
           instr->intrinsic == nir_intrinsic_get_ssbo_size ||
-          instr->intrinsic == nir_intrinsic_load_ssbo_address ||
           instr->intrinsic == nir_intrinsic_image_heap_levels ||
           instr->intrinsic == nir_intrinsic_image_heap_size ||
           instr->intrinsic == nir_intrinsic_image_heap_samples)
@@ -1161,18 +1164,6 @@ nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint)
             glsl_count_attribute_slots(glsl_get_array_element(var->type), false);
          shader->info.per_view_outputs |= BITFIELD64_RANGE(var->data.location, slots);
       }
-
-      /*
-       * Dual-source blending is part of the shader interface, not a
-       * property of whether the output ends up written: a var with
-       * index == 1 still selects dual-source blending even if every
-       * store to it got optimized away (e.g. nir_opt_undef removing a
-       * store whose value is entirely undef).
-       */
-      shader->info.fs.color_is_dual_source |=
-         shader->info.stage == MESA_SHADER_FRAGMENT &&
-         (var->data.index == 1 ||
-          var->data.location == FRAG_RESULT_DUAL_SRC_BLEND);
    }
 
    if (shader->info.stage == MESA_SHADER_FRAGMENT) {

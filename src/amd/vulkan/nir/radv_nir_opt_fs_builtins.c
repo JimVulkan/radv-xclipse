@@ -22,7 +22,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    opt_fs_builtins_state *state = data;
 
-   b->cursor = nir_before_instr(&intr->instr);
+   b->cursor = nir_after_instr(&intr->instr);
 
    nir_def *replacement = NULL;
    if (intr->intrinsic == nir_intrinsic_load_front_face || intr->intrinsic == nir_intrinsic_load_front_face_fsign) {
@@ -48,6 +48,21 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          } else {
             replacement = nir_imm_float(b, force_front_face == 1 ? 1.0 : -1.0);
          }
+      } else {
+         /* 0=sysval, 1=front, -1=back */
+         nir_def *select = nir_load_front_face_select_amd(b);
+         nir_def *use_sysval = nir_ieq_imm(b, select, 0);
+         nir_def *sysval = &intr->def;
+
+         if (intr->intrinsic == nir_intrinsic_load_front_face) {
+            assert(sysval->bit_size == 1);
+            nir_def *const_front_face = nir_ieq_imm(b, select, 1);
+            replacement = nir_bcsel(b, use_sysval, sysval, const_front_face);
+         } else {
+            assert(sysval->bit_size == 32);
+            nir_def *const_front_face = nir_i2f32(b, select);
+            replacement = nir_bcsel(b, use_sysval, sysval, const_front_face);
+         }
       }
    } else if (intr->intrinsic == nir_intrinsic_load_sample_id) {
       if (!state->gfx->dynamic_rasterization_samples && state->gfx->ms.rasterization_samples == 0) {
@@ -58,7 +73,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    if (!replacement)
       return false;
 
-   nir_def_replace(&intr->def, replacement);
+   nir_def_rewrite_uses_after(&intr->def, replacement);
    return true;
 }
 

@@ -85,6 +85,11 @@ build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom
    DEREF(node).triangle_id = global_id;
    DEREF(node).geometry_id_and_flags = geom_data.geometry_id;
 
+   if (VK_TEST_BUILD_FLAG_HAS_QUADS) {
+      REF(vk_ir_triangle_node_quad) quad = vk_ir_triangle_node_get_quad_ref(node);
+      DEREF(quad).triangle_id = VK_QUAD_TRIANGLE_ID_UNUSED;
+   }
+
    return is_valid;
 }
 
@@ -216,18 +221,14 @@ main(void)
 
    uint32_t src_offset = global_id * args.geom_data.stride;
 
-   uint32_t dst_stride;
+   uint32_t dst_stride = vk_ir_node_size(args.geom_data.geometry_type);
    uint32_t node_type;
-   if (args.geom_data.geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR) {
-      dst_stride = SIZEOF(vk_ir_triangle_node);
+   if (args.geom_data.geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR)
       node_type = vk_ir_node_triangle;
-   } else if (args.geom_data.geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR) {
-      dst_stride = SIZEOF(vk_ir_aabb_node);
+   else if (args.geom_data.geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR)
       node_type = vk_ir_node_aabb;
-   } else {
-      dst_stride = SIZEOF(vk_ir_instance_node);
+   else
       node_type = vk_ir_node_instance;
-   }
 
    uint32_t dst_offset = primitive_id * dst_stride;
    VOID_REF dst_ptr = OFFSET(args.bvh, dst_offset);

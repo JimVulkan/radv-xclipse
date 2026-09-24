@@ -411,6 +411,20 @@ ac_titan_remap_dw_quiet(uint32_t base, uint32_t dw)
       return ac_titan_kmap_ucfg(dw);
    return dw;
 }
+/* True when a run of `num` registers from `dw` does not stay contiguous under TITAN's map, so it
+ * has to go out one register at a time (radeonsi's tracked-register runs). */
+static inline bool
+ac_titan_run_split(uint32_t base, uint32_t dw, uint32_t num)
+{
+   if (!ac_titan_regmap_active)
+      return false;
+   const uint32_t d0 = ac_titan_remap_dw_quiet(base, dw);
+   for (uint32_t k = 1; k < num; k++)
+      if (ac_titan_remap_dw_quiet(base, dw + k) != d0 + k)
+         return true;
+   return false;
+}
+
 /* Called where a register write becomes a dword offset. `base` identifies the space; only
  * CONTEXT and SH are touched. */
 static inline uint32_t

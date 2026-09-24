@@ -342,7 +342,7 @@ build_coordinate(struct move_tex_coords_state *state, nir_scalar scalar, coord_i
       }
    }
 
-   return nir_mov_scalar(b, scalar);
+   return &info.load->def;
 }
 
 static bool can_optimize_txd(nir_shader *shader, struct loop_if_state *loop_if, nir_tex_instr *tex,

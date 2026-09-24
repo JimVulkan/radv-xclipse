@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* GENERATED from a PAL init-IB capture on an A55 (Xclipse 530). See radv_queue.c.
+/* GENERATED from a PAL init-IB capture on an A55 (Xclipse 530). Emitted by RADV (radv_queue.c)
+ * and radeonsi (si_state.c) in their preambles.
  * Context-register defaults the CLEAR_STATE mechanism would establish. Values are what the
  * hardware is programmed to at init, observed at runtime -- NOT copied from any source. */
-static const struct { uint32_t reg; uint32_t val; } radv_xclipse_ctx_init[] = {
+static const struct { uint32_t reg; uint32_t val; } ac_xclipse_ctx_init[] = {
    {0x028000, 0x00000000}, /* DB_RENDER_CONTROL */
    {0x028004, 0x00000000}, /* DB_COUNT_CONTROL */
    {0x028008, 0x00000000}, /* DB_DEPTH_VIEW */

@@ -1108,7 +1108,6 @@ nir_get_io_offset_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_store_per_view_output:
    case nir_intrinsic_store_per_primitive_output:
    case nir_intrinsic_store_global_offset:
-   case nir_intrinsic_load_attribute_pan:
    case nir_intrinsic_store_ssbo_block_intel:
    case nir_intrinsic_store_urb_vec4_intel:
    case nir_intrinsic_store_buffer_amd:
@@ -1476,7 +1475,7 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
    /* This must be called after folding constant offset srcs. */
    if (nir->info.stage != MESA_SHADER_MESH &&
        !(nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage)))
-      NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in);
+      NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in, false);
 
    /* Lower and remove dead derefs and variables to clean up the IR. */
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

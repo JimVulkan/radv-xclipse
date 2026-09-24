@@ -545,6 +545,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_QUANTIZATION_MAP_CAPABILITIES_KHR);
       struct VkVideoEncodeRgbConversionCapabilitiesVALVE *rgb_caps =
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_RGB_CONVERSION_CAPABILITIES_VALVE);
+      struct VkVideoEncodeFeedback2CapabilitiesKHR *feedback2_caps =
+         vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_FEEDBACK_2_CAPABILITIES_KHR);
 
       pCapabilities->minBitstreamBufferOffsetAlignment = ecap->bitstream_address_alignment;
       pCapabilities->minBitstreamBufferSizeAlignment = ecap->bitstream_size_alignment;
@@ -577,6 +579,20 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          enc_caps->encodeInputPictureGranularity = pCapabilities->pictureAccessGranularity;
          enc_caps->supportedEncodeFeedbackFlags = VK_VIDEO_ENCODE_FEEDBACK_BITSTREAM_BUFFER_OFFSET_BIT_KHR |
                                                   VK_VIDEO_ENCODE_FEEDBACK_BITSTREAM_BYTES_WRITTEN_BIT_KHR;
+
+         if (pdev->vk.supported_extensions.KHR_video_encode_feedback2) {
+            enc_caps->supportedEncodeFeedbackFlags |= VK_VIDEO_ENCODE_FEEDBACK_INTRA_PIXELS_BIT_KHR |
+                                                      VK_VIDEO_ENCODE_FEEDBACK_INTER_PIXELS_BIT_KHR;
+            if (ecap->feedback.avg_qp)
+               enc_caps->supportedEncodeFeedbackFlags |= VK_VIDEO_ENCODE_FEEDBACK_AVERAGE_QUANTIZATION_BIT_KHR;
+            if (ecap->feedback.skipped_pixels)
+               enc_caps->supportedEncodeFeedbackFlags |= VK_VIDEO_ENCODE_FEEDBACK_SKIPPED_PIXELS_BIT_KHR;
+            if (ecap->feedback.minmax_qp)
+               enc_caps->supportedEncodeFeedbackFlags |=
+                  (VK_VIDEO_ENCODE_FEEDBACK_MIN_QUANTIZATION_BIT_KHR | VK_VIDEO_ENCODE_FEEDBACK_MAX_QUANTIZATION_BIT_KHR);
+            if (ecap->feedback.partition_count)
+               enc_caps->supportedEncodeFeedbackFlags |= VK_VIDEO_ENCODE_FEEDBACK_PICTURE_PARTITION_COUNT_BIT_KHR;
+         }
       }
 
       if (intra_refresh_caps) {
@@ -602,6 +618,12 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          rgb_caps->xChromaOffsets = VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE;
          rgb_caps->yChromaOffsets = VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_MIDPOINT_BIT_VALVE |
                                     VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE;
+      }
+
+      if (feedback2_caps) {
+         /* TODO: support per-partition */
+         feedback2_caps->supportedPerPartitionEncodeFeedbackFlags = 0;
+         feedback2_caps->maxPerPartitionFeedbackEntries = 0;
       }
    }
 
@@ -1535,9 +1557,9 @@ get_av1_param(struct radv_video_session *vid, struct vk_video_session_parameters
       av1->quantization.delta_q_v_dc = pi->pQuantization->DeltaQVDc;
       av1->quantization.delta_q_v_ac = pi->pQuantization->DeltaQVAc;
       if (pi->pQuantization->flags.using_qmatrix) {
-         av1->quantization.qm_y = pi->pQuantization->qm_y;
-         av1->quantization.qm_u = pi->pQuantization->qm_u;
-         av1->quantization.qm_v = pi->pQuantization->qm_v;
+         av1->quantization.qm_y = pi->pQuantization->qm_y | 0xf0;
+         av1->quantization.qm_u = pi->pQuantization->qm_u | 0xf0;
+         av1->quantization.qm_v = pi->pQuantization->qm_v | 0xf0;
       } else {
          av1->quantization.qm_y = 0xff;
          av1->quantization.qm_u = 0xff;
@@ -1605,19 +1627,17 @@ get_av1_param(struct radv_video_session *vid, struct vk_video_session_parameters
    }
 
    if (pi->pTileInfo) {
-      const unsigned sb_shift = seq_hdr->flags.use_128x128_superblock ? 5 : 4;
       av1->tile_info.tile_cols = pi->pTileInfo->TileCols;
       av1->tile_info.tile_rows = pi->pTileInfo->TileRows;
       av1->tile_info.context_update_tile_id = pi->pTileInfo->context_update_tile_id;
-      for (unsigned i = 0; i < pi->pTileInfo->TileCols; ++i) {
+      for (unsigned i = 0; i < AV1_MAX_TILE_COLS + 1; ++i) {
+         const unsigned sb_shift = seq_hdr->flags.use_128x128_superblock ? 5 : 4;
          av1->tile_info.tile_col_start_sb[i] = pi->pTileInfo->pMiColStarts[i] >> sb_shift;
-         av1->tile_info.width_in_sbs[i] = pi->pTileInfo->pWidthInSbsMinus1[i];
-      }
-      for (unsigned i = 0; i < pi->pTileInfo->TileRows; ++i) {
          av1->tile_info.tile_row_start_sb[i] = pi->pTileInfo->pMiRowStarts[i] >> sb_shift;
-         av1->tile_info.height_in_sbs[i] = pi->pTileInfo->pHeightInSbsMinus1[i];
       }
-      for (unsigned i = 0; i < MIN2(av1_pic_info->tileCount, AV1_MAX_NUM_TILES); ++i) {
+      memcpy(av1->tile_info.width_in_sbs, pi->pTileInfo->pWidthInSbsMinus1, sizeof(av1->tile_info.width_in_sbs));
+      memcpy(av1->tile_info.height_in_sbs, pi->pTileInfo->pHeightInSbsMinus1, sizeof(av1->tile_info.height_in_sbs));
+      for (unsigned i = 0; i < AV1_MAX_NUM_TILES; ++i) {
          av1->tile_info.tile_offset[i] = av1_pic_info->pTileOffsets[i];
          av1->tile_info.tile_size[i] = av1_pic_info->pTileSizes[i];
       }
