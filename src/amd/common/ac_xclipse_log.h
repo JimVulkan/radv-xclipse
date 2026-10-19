@@ -26,7 +26,8 @@ int ac_xclipse_log_level(void);
 }
 #endif
 
-#ifdef __ANDROID__
+/* On glibc Linux (PRoot) <android/log.h> is include/xclipse_linux_compat's, logging to stderr. */
+#if defined(__ANDROID__) || defined(__linux__)
 #include <android/log.h>
 
 /* __android_log_print, but free while the level is 0: the arguments are not even evaluated. */

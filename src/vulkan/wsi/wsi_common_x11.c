@@ -643,7 +643,7 @@ wsi_GetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physicalDevice,
    if (!wsi_conn)
       return false;
 
-   if (!wsi_device->sw) {
+   if (!wsi_device->sw && !wsi_device->x11_sw_fallback) {
       if (!wsi_x11_check_for_dri3(wsi_conn))
          return false;
    }
@@ -718,7 +718,7 @@ x11_surface_get_support(VkIcdSurfaceBase *icd_surface,
    if (!wsi_conn)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   if (!wsi_device->sw) {
+   if (!wsi_device->sw && !wsi_device->x11_sw_fallback) {
       if (!wsi_x11_check_for_dri3(wsi_conn)) {
          *pSupported = false;
          return VK_SUCCESS;
@@ -2094,7 +2094,7 @@ x11_present_to_x11(struct x11_swapchain *chain, uint32_t image_index,
    x11_capture_trace(chain);
 
    VkResult result;
-   if (chain->base.wsi->sw && !chain->has_mit_shm)
+   if (chain->base.sw && !chain->has_mit_shm)
       result = x11_present_to_x11_sw(chain, image_index);
    else
 #ifdef HAVE_X11_DRM
@@ -2647,7 +2647,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
       return result;
 
    image->update_region = None;
-   if (chain->base.wsi->sw && !chain->has_mit_shm)
+   if (chain->base.sw && !chain->has_mit_shm)
       return VK_SUCCESS;
 
 #ifdef HAVE_X11_DRM
@@ -2658,7 +2658,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
    image->update_region = xcb_generate_id(chain->conn);
    xcb_xfixes_create_region(chain->conn, image->update_region, 0, NULL);
 
-   if (chain->base.wsi->sw) {
+   if (chain->base.sw) {
       image->shmseg = xcb_generate_id(chain->conn);
 
       xcb_shm_attach(chain->conn,
@@ -2800,7 +2800,7 @@ x11_image_finish(struct x11_swapchain *chain,
                  struct x11_image *image)
 {
    xcb_void_cookie_t cookie;
-   if (!chain->base.wsi->sw || chain->has_mit_shm) {
+   if (!chain->base.sw || chain->has_mit_shm) {
 #ifdef HAVE_X11_DRM
       cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
       xcb_discard_reply(chain->conn, cookie.sequence);
@@ -2933,7 +2933,7 @@ wsi_x11_swapchain_query_dri3_modifiers_changed(struct x11_swapchain *chain)
 {
    const struct wsi_device *wsi_device = chain->base.wsi;
 
-   if (wsi_device->sw || !use_modifiers(wsi_device))
+   if (chain->base.sw || !use_modifiers(wsi_device))
       return false;
 
    struct wsi_drm_image_params drm_image_params;
@@ -3221,7 +3221,8 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    struct wsi_base_image_params *image_params = NULL;
    struct wsi_cpu_image_params cpu_image_params;
    uint64_t *modifiers[2] = {NULL, NULL};
-   if (wsi_device->sw) {
+   const bool use_sw = wsi_device->sw || (wsi_device->x11_sw_fallback && !wsi_conn->has_dri3);
+   if (use_sw) {
       cpu_image_params = (struct wsi_cpu_image_params) {
          .base.image_type = WSI_IMAGE_TYPE_CPU,
          .alloc_shm = wsi_conn->has_mit_shm ? &alloc_shm : NULL,
@@ -3265,6 +3266,7 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    if (result != VK_SUCCESS)
       goto fail_alloc;
+   chain->base.sw = use_sw;
 
    chain->base.destroy = x11_swapchain_destroy;
    chain->base.get_wsi_image = x11_get_wsi_image;

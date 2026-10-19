@@ -15,12 +15,12 @@
 #include "ac_xclipse_log.h"
 #include "radv_meta.h"
 #include "vk_format.h"
+#include "radv_cpushare.h"
 #ifdef __ANDROID__
 #include <android/log.h>
 #include <time.h>
 #include "util/simple_mtx.h"
 #include "util/u_atomic.h"
-#include "radv_cpushare.h"
 #endif
 
 #ifdef __ANDROID__

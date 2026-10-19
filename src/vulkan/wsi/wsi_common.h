@@ -165,6 +165,17 @@ struct wsi_device {
 
    bool sw;
 
+   /* X11 only: an X connection without DRI3 gets CPU-image swapchains (as `sw`, no MIT-SHM)
+    * instead of no presentation support; one with DRI3 keeps the DRM path. For a GPU whose
+    * userspace may face either kind of X server (Xclipse in a Termux PRoot: Termux:X11 has DRI3,
+    * a VNC server does not). */
+   bool x11_sw_fallback;
+
+   /* Wayland only: a compositor without zwp_linux_dmabuf_v1 (one that renders on the CPU, as in a
+    * Termux PRoot) gets CPU-image swapchains copied into wl_shm buffers instead of no presentation
+    * support; one with dma-buf keeps the DRM path. */
+   bool wl_sw_fallback;
+
    /* Set to true if the implementation is ok with linear WSI images. */
    bool wants_linear;
 

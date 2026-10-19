@@ -1106,6 +1106,13 @@ with_libbacktrace = get_option('android-libbacktrace') \
   .disable_auto_if(not with_platform_android) \
   .allowed()
 
+# Xclipse fork: the Xclipse code logs through liblog and reads Android properties. A glibc Linux
+# build (PRoot) gets stand-ins for those two headers: logs to stderr, properties as environment
+# variables (include/xclipse_linux_compat).
+if not with_platform_android and host_machine.system() == 'linux'
+  pre_args += ['-isystem', join_paths(meson.current_source_dir(), 'include', 'xclipse_linux_compat')]
+endif
+
 if with_platform_android
   dep_android_ui = null_dep
   dep_android_mapper4 = null_dep

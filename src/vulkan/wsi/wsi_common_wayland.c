@@ -137,6 +137,9 @@ struct wsi_wl_display {
    struct u_vector colorspaces;
 
    bool sw;
+   /* wsi_device->wl_sw_fallback for a GPU driver: wl_shm is bound too, and the display switches to
+    * `sw` when the compositor offers no zwp_linux_dmabuf_v1. */
+   bool sw_fallback;
 
    dev_t main_device;
    bool same_gpu;
@@ -1009,6 +1012,10 @@ shm_handle_format(void *data, struct wl_shm *shm, uint32_t format)
 {
    struct wsi_wl_display *display = data;
 
+   /* A wl_shm bound only as a fallback reports nothing unless the display ends up using it. */
+   if (!display->sw)
+      return;
+
    wsi_wl_display_add_wl_shm_format(display, &display->formats, format);
 }
 
@@ -1488,12 +1495,13 @@ registry_handle_global(void *data, struct wl_registry *registry,
 {
    struct wsi_wl_display *display = data;
 
-   if (display->sw) {
+   if (display->sw || display->sw_fallback) {
       if (strcmp(interface, wl_shm_interface.name) == 0) {
          display->wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
          wl_shm_add_listener(display->wl_shm, &shm_listener, display);
       }
-   } else {
+   }
+   if (!display->sw) {
       if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0 && version >= 3) {
          display->wl_dmabuf =
             wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface,
@@ -1617,6 +1625,7 @@ wsi_wl_display_init(struct wsi_wayland *wsi_wl,
    display->wsi_wl = wsi_wl;
    display->wl_display = wl_display;
    display->sw = sw;
+   display->sw_fallback = !sw && wsi_wl->wsi->wl_sw_fallback;
 
    display->queue = wl_display_create_queue_with_name(wl_display, queue_name);
    if (!display->queue) {
@@ -1649,6 +1658,17 @@ wsi_wl_display_init(struct wsi_wayland *wsi_wl,
    if (!display->wl_dmabuf && !display->wl_shm) {
       result = VK_ERROR_SURFACE_LOST_KHR;
       goto fail_registry;
+   }
+
+   /* No dma-buf (a compositor that renders on the CPU): present CPU images through wl_shm. The
+    * shm formats arrive with the next round-trip, after this decision. */
+   if (display->sw_fallback) {
+      if (!display->wl_dmabuf) {
+         display->sw = true;
+      } else if (display->wl_shm) {
+         wl_shm_destroy(display->wl_shm);
+         display->wl_shm = NULL;
+      }
    }
 
    /* Caller doesn't expect us to query formats/modifiers, so return */
@@ -3886,11 +3906,14 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    struct wsi_drm_image_params drm_image_params;
    uint32_t num_drm_modifiers = 0;
    const uint64_t *drm_modifiers = NULL;
-   if (wsi_device->sw) {
+   /* wsi_device->sw, or a GPU driver on a compositor without dma-buf (wl_sw_fallback). */
+   const bool use_sw = wsi_device->sw || wsi_wl_surface->display->sw;
+   if (use_sw) {
       cpu_image_params = (struct wsi_cpu_image_params) {
          .base.image_type = WSI_IMAGE_TYPE_CPU,
       };
-      if (wsi_device->has_import_memory_host &&
+      /* The fallback copies: host memory import is a software driver's path. */
+      if (wsi_device->sw && wsi_device->has_import_memory_host &&
           !(WSI_DEBUG & WSI_DEBUG_NOSHM)) {
          buffer_type = WSI_WL_BUFFER_GPU_SHM;
          cpu_image_params.alloc_shm = wsi_wl_alloc_image_shm;
@@ -3937,6 +3960,7 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
                                pCreateInfo, image_params, pAllocator);
    if (result != VK_SUCCESS)
       goto fail;
+   chain->base.sw = use_sw;
 
    bool alpha = pCreateInfo->compositeAlpha ==
                       VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;

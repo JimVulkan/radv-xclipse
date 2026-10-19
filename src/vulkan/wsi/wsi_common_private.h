@@ -225,6 +225,9 @@ struct wsi_swapchain {
 
    const struct wsi_device *wsi;
 
+   /* CPU-image presentation for this swapchain: wsi->sw, or an X11 fallback (x11_sw_fallback). */
+   bool sw;
+
    VkSwapchainCreateFlagsKHR create_flags;
 
    VkDevice device;

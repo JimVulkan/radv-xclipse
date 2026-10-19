@@ -12,8 +12,6 @@
 #ifndef RADV_CPUSHARE_H
 #define RADV_CPUSHARE_H
 
-#ifdef __ANDROID__
-
 #include <stdint.h>
 #include <time.h>
 
@@ -28,7 +26,16 @@ enum {
    RADV_CPU_NBUCKET
 };
 
+#ifdef __ANDROID__
 void radv_cpushare_add(int bucket, uint64_t ns);
+#else
+/* Off Android (a glibc PRoot build) nothing prints the shares: adding is a no-op. */
+static inline void
+radv_cpushare_add(int bucket, uint64_t ns)
+{
+   (void)bucket, (void)ns;
+}
+#endif
 
 static inline uint64_t
 radv_cpushare_now(void)
@@ -38,13 +45,12 @@ radv_cpushare_now(void)
    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+#ifdef __ANDROID__
 #define RADV_CPU_T0()   const uint64_t _radv_cpu_t0 = radv_cpushare_now()
 #define RADV_CPU_T1(b)  radv_cpushare_add((b), radv_cpushare_now() - _radv_cpu_t0)
-
-#else /* !__ANDROID__ */
-
+#else
 #define RADV_CPU_T0()   do {} while (0)
 #define RADV_CPU_T1(b)  do {} while (0)
-
 #endif
+
 #endif /* RADV_CPUSHARE_H */

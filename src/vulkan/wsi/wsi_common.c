@@ -506,6 +506,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
 
    chain->create_flags = pCreateInfo->flags;
    chain->wsi = wsi;
+   chain->sw = wsi->sw;
    chain->device = _device;
    chain->alloc = *pAllocator;
    chain->blit.type = get_blit_type(wsi, image_params, _device);
@@ -2887,7 +2888,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
 #endif
       }
 
-      if (wsi->sw) {
+      if (swapchain->sw) {
          wsi->WaitForFences(vk_device_to_handle(dev),
                             1, &swapchain->fences[image_index], true, ~0ull);
       }
