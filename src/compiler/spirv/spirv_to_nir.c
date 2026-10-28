@@ -145,6 +145,7 @@ static const struct spirv_capabilities implemented_capabilities = {
    .PerViewAttributesNV = true,
    .PhysicalStorageBufferAddresses = true,
    .QuadControlKHR = true,
+   .RawAccessChainsNV = true,
    .RayCullMaskKHR = true,
    .RayQueryKHR = true,
    .RayQueryPositionFetchKHR = true,
@@ -7079,6 +7080,7 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpUntypedInBoundsPtrAccessChainKHR:
    case SpvOpUntypedArrayLengthKHR:
    case SpvOpBufferPointerEXT:
+   case SpvOpRawAccessChainNV:
       vtn_handle_variables(b, opcode, w, count);
       break;
 

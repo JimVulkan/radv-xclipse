@@ -78,14 +78,76 @@ largest_handle_fd(const native_handle_t *handle)
 #define SEC_HND_ALLOC_FORMAT 37 /* HAL format actually allocated */
 #define SEC_HND_LAYOUT       38 /* 1 linear, 2 compressed tiling (probe/gfx/grhandle, ahbx) */
 #define SEC_HND_NUM_PLANES   39
+#define SEC_HND_NUM_BUFS     40 /* dma-bufs: plane i is in data[i] when this is > 1, else all in data[0] */
 #define SEC_HND_PLANE0       41 /* per plane: size, offset, byte stride, alloc width, alloc height */
 #define SEC_HND_PLANE_INTS   10
+
+/* Allocated formats of the YUV buffers, measured on SM-S908B with probe/gfx/grhandle.c. A
+ * YCbCr_420_888 request is allocated as Exynos NV12M: Y and CbCr in two dma-bufs, each plane at
+ * offset 0 of its own. P010 and YV12 keep all planes in one dma-buf at the handle's offsets. */
+#define SEC_HAL_YCbCr_420_SP_M 0x105
+
+static int
+sec_yuv_fourcc(int format, int num_planes)
+{
+   switch (format) {
+   case SEC_HAL_YCbCr_420_SP_M:
+      return num_planes == 2 ? DRM_FORMAT_NV12 : -1;
+   case HAL_PIXEL_FORMAT_YCBCR_P010:
+      return num_planes == 2 ? DRM_FORMAT_P010 : -1;
+   case HAL_PIXEL_FORMAT_YV12:
+      return num_planes == 3 ? DRM_FORMAT_YVU420 : -1;
+   default:
+      return -1;
+   }
+}
 
 static uint64_t
 sec_hnd_u64(const native_handle_t *handle, int idx)
 {
    return (uint64_t)(uint32_t)handle->data[idx] |
           ((uint64_t)(uint32_t)handle->data[idx + 1] << 32);
+}
+
+static int
+samsung_gralloc_get_yuv_info(const native_handle_t *handle, int format, int num_planes,
+                             struct u_gralloc_buffer_basic_info *out)
+{
+   const int drm_fourcc = sec_yuv_fourcc(format, num_planes);
+   const int num_bufs = handle->data[SEC_HND_NUM_BUFS];
+   const uint64_t height = (uint32_t)handle->data[SEC_HND_HEIGHT];
+
+   if (drm_fourcc == -1 || num_bufs < 1 || num_bufs > handle->numFds ||
+       (num_bufs > 1 && num_bufs != num_planes) ||
+       handle->numFds + handle->numInts < SEC_HND_PLANE0 + num_planes * SEC_HND_PLANE_INTS) {
+      mesa_loge("Samsung gralloc: unsupported format 0x%x (%d planes, %d buffers)", format,
+                num_planes, num_bufs);
+      return -EINVAL;
+   }
+
+   for (int i = 0; i < num_planes; i++) {
+      const int p = SEC_HND_PLANE0 + i * SEC_HND_PLANE_INTS;
+      const uint64_t size = sec_hnd_u64(handle, p);
+      const uint64_t offset = sec_hnd_u64(handle, p + 2);
+      const uint64_t stride = sec_hnd_u64(handle, p + 4);
+      /* 4:2:0 chroma planes have half the rows. */
+      const uint64_t rows = i ? (height + 1) / 2 : height;
+
+      if (stride == 0 || stride > INT32_MAX || offset > INT32_MAX || size < stride * rows) {
+         mesa_loge("Samsung gralloc: inconsistent plane %d (format 0x%x, stride %" PRIu64
+                   ", size %" PRIu64 ")", i, format, stride, size);
+         return -EINVAL;
+      }
+      out->fds[i] = handle->data[num_bufs > 1 ? i : 0];
+      out->offsets[i] = offset;
+      out->strides[i] = stride;
+   }
+
+   out->drm_fourcc = drm_fourcc;
+   out->modifier = DRM_FORMAT_MOD_LINEAR;
+   out->num_planes = num_planes;
+
+   return 0;
 }
 
 /* Returns -ENOENT when the handle is not a Samsung gralloc handle. */
@@ -116,10 +178,8 @@ samsung_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
                       handle->data[SEC_HND_WIDTH], handle->data[SEC_HND_HEIGHT], handle->data[SEC_HND_LAYOUT]);
       }
    }
-   if (num_planes != 1 || is_hal_format_yuv(format)) {
-      mesa_loge("Samsung gralloc: unsupported format 0x%x (%d planes)", format, num_planes);
-      return -EINVAL;
-   }
+   if (num_planes != 1 || is_hal_format_yuv(format))
+      return samsung_gralloc_get_yuv_info(handle, format, num_planes, out);
 
    const int drm_fourcc = get_fourcc_from_hal_format(format);
    if (drm_fourcc == -1)

@@ -968,6 +968,28 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
       RADV_LOGI("[QUEUE] IFPO guard armed (CP_PERFMON_CNTL=STOP_COUNTING blocks inter-frame power off)");
    }
 
+   /* Xclipse 960: its kernel programs neither the GL2-to-LLC allocation policy per MTYPE nor
+    * GL2C_CTRL5 (the 940's golden list sets both), and the vendor driver restates them at the start
+    * of every submit. Same values as its submits, effective at the first draw. */
+   if (pdev->xclipse_llc) {
+      static const uint32_t mty[18] = {
+         0x124996db, 0x0001369a, 0, 0, /* MTY0, MTY1 */
+         0x1b6db6db, 0x0001b6db, 0x1b6db6db, 0x0001b6db, 0x1b6db6db, 0x0001b6db, /* MTY2..4 */
+         0x1b6db6db, 0x0001b6db, 0x1b6db6db, 0x0001b6db, 0x1b6db6db, 0x0001b6db, /* MTY5..7 */
+         0, 0, /* MTY_RIDX, MTY_WIDX */
+      };
+      static const uint32_t tail[11] = {
+         0x0001ff7f, 0x0001ff7f, 0x0001ffff, 0xffffffff, 0xffffffff, 0xffffffff,
+         0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(mty); i++)
+         ac_pm4_set_reg(pm4, CIK_UCONFIG_REG_OFFSET + (0x480 + i) * 4, mty[i]);
+      ac_pm4_set_reg(pm4, CIK_UCONFIG_REG_OFFSET + 0x493 * 4, 0x41); /* GL2ACEM_LLC_TEX */
+      for (unsigned i = 0; i < ARRAY_SIZE(tail); i++)
+         ac_pm4_set_reg(pm4, CIK_UCONFIG_REG_OFFSET + (0x494 + i) * 4, tail[i]);
+      ac_pm4_set_reg(pm4, CIK_UCONFIG_REG_OFFSET + 0x4c0 * 4, 0x00080128); /* GL2C_CTRL5 */
+   }
+
    ac_pm4_finalize(pm4);
    ac_pm4_emit_commands(cs->b, pm4);
    ac_pm4_free_state(pm4);

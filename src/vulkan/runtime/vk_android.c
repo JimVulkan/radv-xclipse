@@ -143,7 +143,7 @@ static VkResult
 vk_gralloc_to_drm_explicit_layout(
    struct u_gralloc_buffer_handle *in_hnd,
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts, int max_planes)
+   VkSubresourceLayout *out_layouts, int max_planes, int *plane_fds)
 {
    struct u_gralloc_buffer_basic_info info;
    struct u_gralloc *u_gralloc = vk_android_get_ugralloc();
@@ -160,8 +160,12 @@ vk_gralloc_to_drm_explicit_layout(
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
 
+   /* A plane at offset 0 of its own dma-buf (Samsung's NV12M puts Y and CbCr in two) is only
+    * accepted from callers that take the per-plane fds and bind each plane to its own BO. */
    bool is_disjoint = false;
    for (size_t i = 1; i < info.num_planes; i++) {
+      if (plane_fds && info.fds[i] > 0 && info.fds[i] != info.fds[0])
+         continue;
       if (info.offsets[i] == 0) {
          is_disjoint = true;
          mesa_loge("disjoint planes (info.offsets[%zu] == 0) unsupported", i);
@@ -186,6 +190,8 @@ vk_gralloc_to_drm_explicit_layout(
    for (size_t i = 0; i < info.num_planes; i++) {
       out_layouts[i].offset = info.offsets[i];
       out_layouts[i].rowPitch = info.strides[i];
+      if (plane_fds)
+         plane_fds[i] = info.fds[i] > 0 ? info.fds[i] : info.fds[0];
    }
 
    /* Compute arrayPitch for multi-layer buffers. The gralloc HAL does not
@@ -205,6 +211,11 @@ vk_gralloc_to_drm_explicit_layout(
       VkSubresourceLayout tmp = out_layouts[1];
       out_layouts[1] = out_layouts[2];
       out_layouts[2] = tmp;
+      if (plane_fds) {
+         const int fd = plane_fds[1];
+         plane_fds[1] = plane_fds[2];
+         plane_fds[2] = fd;
+      }
    }
 
    return VK_SUCCESS;
@@ -369,7 +380,7 @@ vk_android_get_anb_layout(
    };
 
    return vk_gralloc_to_drm_explicit_layout(&gr_handle, out,
-                                            out_layouts, max_planes);
+                                            out_layouts, max_planes, NULL);
 }
 
 VkResult
@@ -757,6 +768,16 @@ vk_android_get_ahb_layout(
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes)
 {
+   return vk_android_get_ahb_layout_fds(ahardware_buffer, out, out_layouts,
+                                        max_planes, NULL);
+}
+
+VkResult
+vk_android_get_ahb_layout_fds(
+   struct AHardwareBuffer *ahardware_buffer,
+   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
+   VkSubresourceLayout *out_layouts, int max_planes, int *plane_fds)
+{
    AHardwareBuffer_Desc description;
    const native_handle_t *handle =
       AHardwareBuffer_getNativeHandle(ahardware_buffer);
@@ -770,7 +791,7 @@ vk_android_get_ahb_layout(
    };
 
    return vk_gralloc_to_drm_explicit_layout(&gr_handle, out,
-                                            out_layouts, max_planes);
+                                            out_layouts, max_planes, plane_fds);
 }
 
 /* From the Android hardware_buffer.h header:

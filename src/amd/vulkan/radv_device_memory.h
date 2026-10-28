@@ -23,6 +23,9 @@ struct radv_device_memory {
    /* for dedicated allocations */
    struct radv_image *image;
    struct radv_buffer *buffer;
+   /* Planes 1 and 2 of an AHardwareBuffer whose planes are in separate dma-bufs (Samsung NV12M),
+    * NULL when the plane shares bo. */
+   struct radeon_winsys_bo *ahb_plane_bo[2];
    uint32_t heap_index;
    uint64_t alloc_size;
    void *map;

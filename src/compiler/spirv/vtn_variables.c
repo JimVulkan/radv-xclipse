@@ -2966,6 +2966,69 @@ vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
+   case SpvOpRawAccessChainNV: {
+      /* SPV_NV_raw_access_chains: Base + Byte stride * Element index + Byte offset, a byte address
+       * into the buffer Base points to, typed as the result's pointee. Lowered to a cast of Base
+       * with a one-byte pointer stride, indexed by the byte offset; explicit IO then adds it to the
+       * buffer address like any other offset.
+       */
+      struct vtn_type *ptr_type = vtn_get_type(b, w[1]);
+      struct vtn_pointer *base = vtn_pointer(b, w[3]);
+      const SpvRawAccessChainOperandsMask robust =
+         count > 7 ? w[7] : SpvRawAccessChainOperandsMaskNone;
+
+      vtn_fail_if(ptr_type->base_type != vtn_base_type_pointer || !ptr_type->pointed,
+                  "OpRawAccessChainNV must return a typed pointer");
+      vtn_fail_if(base->mode != vtn_variable_mode_ssbo && base->mode != vtn_variable_mode_phys_ssbo,
+                  "OpRawAccessChainNV only takes StorageBuffer or PhysicalStorageBuffer pointers");
+
+      nir_deref_instr *base_deref = vtn_pointer_to_deref(b, base);
+      const unsigned bit_size = base_deref->def.bit_size;
+
+      nir_def *stride = nir_u2u32(&b->nb, vtn_get_nir_ssa(b, w[4]));
+      nir_def *index = nir_u2u32(&b->nb, vtn_get_nir_ssa(b, w[5]));
+      nir_def *offset = nir_u2u32(&b->nb, vtn_get_nir_ssa(b, w[6]));
+      nir_def *bytes = nir_iadd(&b->nb, nir_imul(&b->nb, stride, index), offset);
+
+      /* Per component needs nothing more: every dword of an SSBO access is checked against the
+       * buffer range. Per element, the whole element is out of bounds when any of it is, which
+       * is index >= size / stride (the stride is a nonzero constant there); such an access is
+       * moved past any buffer range. */
+      if ((robust & SpvRawAccessChainOperandsRobustnessPerElementNVMask) &&
+          base->mode == vtn_variable_mode_ssbo) {
+         nir_deref_instr *bytes_view =
+            nir_build_deref_cast(&b->nb, &base_deref->def, nir_var_mem_ssbo,
+                                 glsl_array_type(glsl_uint8_t_type(), 0, 1), 0);
+         nir_def *size = nir_deref_buffer_array_length(&b->nb, 32, &bytes_view->def,
+                                                       .access = base->access);
+         nir_def *in_bounds = nir_ult(&b->nb, index, nir_udiv(&b->nb, size, stride));
+         bytes = nir_bcsel(&b->nb, in_bounds, bytes, nir_imm_int(&b->nb, 0xfffffff0));
+      }
+
+      /* D3D raw and structured buffer addresses are dword aligned; a narrower pointee is aligned
+       * to its own scalar size. Stated alignment on the load or store refines this. */
+      const struct glsl_type *pointee = vtn_type_get_nir_type(b, ptr_type->pointed, base->mode);
+      const struct glsl_type *scalar = glsl_without_array_or_matrix(pointee);
+      unsigned align = 4;
+      if (glsl_type_is_vector_or_scalar(scalar) && glsl_get_bit_size(scalar) < 32)
+         align = glsl_get_bit_size(scalar) / 8;
+
+      nir_variable_mode nir_mode;
+      vtn_storage_class_to_mode(b, ptr_type->storage_class, ptr_type->pointed, &nir_mode);
+      nir_deref_instr *cast =
+         nir_build_deref_cast_with_alignment(&b->nb, &base_deref->def, nir_mode, pointee, 1, align, 0);
+      nir_deref_instr *deref =
+         nir_build_deref_ptr_as_array(&b->nb, cast, nir_u2uN(&b->nb, bytes, bit_size));
+
+      struct vtn_pointer *ptr = vtn_zalloc(b, struct vtn_pointer);
+      ptr->mode = base->mode;
+      ptr->type = ptr_type;
+      ptr->deref = deref;
+      ptr->access = base->access;
+      vtn_push_pointer(b, w[2], ptr);
+      break;
+   }
+
    case SpvOpCopyMemory: {
       struct vtn_value *dest_val = vtn_pointer_value(b, w[1]);
       struct vtn_value *src_val = vtn_pointer_value(b, w[2]);

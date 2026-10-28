@@ -152,6 +152,9 @@ struct radv_physical_device {
    bool xclipse_dcc;
    /* Xclipse: DCC also for colour targets of 512x512 and less (debug.radv_xclipse_dcc_small 0 = off). */
    bool xclipse_dcc_small;
+   /* Xclipse 960: restate the vendor's GL2/LLC cache policy every submit (RADV_XCLIPSE_LLC=1 /
+    * debug.radv_xclipse_llc 1; off by default). */
+   bool xclipse_llc;
 
    /* Whether to emulate ASTC image support on HW without support. */
    bool emulate_astc;

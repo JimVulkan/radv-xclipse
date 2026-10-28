@@ -12864,12 +12864,41 @@ radv_emit_direct_taskmesh_draw_packets(const struct radv_device *device, struct 
 static void
 radv_emit_indirect_taskmesh_draw_packets(const struct radv_device *device, struct radv_cmd_state *cmd_state,
                                          struct radv_cmd_stream *cs, struct radv_cmd_stream *ace_cs,
-                                         const struct radv_draw_info *info)
+                                         const struct radv_draw_info *info, uint64_t workaround_cond_va)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const uint32_t view_mask = cmd_state->render.view_mask;
+   const unsigned num_views = MAX2(1, util_bitcount(view_mask));
+
+   /* XCLIPSE: Samsung's MEC firmware predates the fix, and upstream now hides task/mesh shaders
+    * on such firmware. Keep the workaround so VK_EXT_mesh_shader stays exposed.
+    */
+   if (pdev->info.has_taskmesh_indirect0_bug && info->count_va) {
+      /* MEC firmware bug workaround.
+       * When the count buffer contains zero, DISPATCH_TASKMESH_INDIRECT_MULTI_ACE hangs.
+       * - We must ensure that DISPATCH_TASKMESH_INDIRECT_MULTI_ACE
+       *   is only executed when the count buffer contains non-zero.
+       * - Furthermore, we must also ensure that each DISPATCH_TASKMESH_GFX packet
+       *   has a matching ACE packet.
+       *
+       * As a workaround:
+       * - Reserve a dword in the upload buffer and initialize it to 1 for the workaround
+       * - When count != 0, write 0 to the workaround BO and execute the indirect dispatch
+       * - When workaround BO != 0 (count was 0), execute an empty direct dispatch
+       */
+      ac_emit_cp_copy_data(ace_cs->b, COPY_DATA_IMM, COPY_DATA_DST_MEM, 1, workaround_cond_va,
+                           AC_CP_COPY_DATA_WR_CONFIRM, false);
+   }
 
    uint32_t *ace_predication = radv_cs_begin_compute_predication(device, cmd_state, ace_cs);
+
+   if (workaround_cond_va) {
+      ac_emit_cp_cond_exec(ace_cs->b, pdev->info.gfx_level, info->count_va,
+                           6 + 11 * num_views /* 1x COPY_DATA + Nx DISPATCH_TASKMESH_INDIRECT_MULTI_ACE */);
+
+      ac_emit_cp_copy_data(ace_cs->b, COPY_DATA_IMM, COPY_DATA_DST_MEM, 0, workaround_cond_va,
+                           AC_CP_COPY_DATA_WR_CONFIRM, false);
+   }
 
    if (!view_mask) {
       radv_cs_emit_dispatch_taskmesh_indirect_multi_ace_packet(device, cmd_state, ace_cs, info->indirect_va,
@@ -12882,6 +12911,15 @@ radv_emit_indirect_taskmesh_draw_packets(const struct radv_device *device, struc
          radv_cs_emit_dispatch_taskmesh_indirect_multi_ace_packet(device, cmd_state, ace_cs, info->indirect_va,
                                                                   info->count, info->count_va, info->stride);
          radv_cs_emit_dispatch_taskmesh_gfx_packet(device, cmd_state, cs);
+      }
+   }
+
+   if (workaround_cond_va) {
+      ac_emit_cp_cond_exec(ace_cs->b, pdev->info.gfx_level, workaround_cond_va,
+                           6 * num_views /* Nx DISPATCH_TASKMESH_DIRECT_ACE */);
+
+      for (unsigned v = 0; v < num_views; ++v) {
+         radv_cs_emit_dispatch_taskmesh_direct_ace_packet(device, cmd_state, ace_cs, 0, 0, 0);
       }
    }
 
@@ -14074,15 +14112,8 @@ radv_emit_cb_render_state(struct radv_cmd_buffer *cmd_buffer)
       /* RB+ doesn't work with dual source blending and logic op. */
       cb_color_control |= S_028808_DISABLE_DUAL_QUAD(mrt0_is_dual_src || d->vk.cb.logic_op_enable);
 
-      /* Xclipse 920: disable the RB+ blend optimisation hints (OPT_COMB_NONE) while keeping RB+.
-       * Mis-encoded hints make the CB skip real dst reads, so colour writes never land. */
-      if (pdev->info.gfx11_shader_core) {
-         for (unsigned i = 0; i < MAX_RTS; i++) {
-            sx_mrt_blend_opt[i] =
-               S_028760_COLOR_COMB_FCN(V_028760_OPT_COMB_NONE) | S_028760_ALPHA_COMB_FCN(V_028760_OPT_COMB_NONE);
-         }
-      }
-
+      /* Xclipse: the stock blend-opt hints are kept, as PAL programs them. Neutralising them to
+       * OPT_COMB_NONE (the v21 workaround, from before packed exports) halved the pixel rate. */
       if (mrt0_is_dual_src) {
          for (unsigned i = 0; i < MAX_RTS; i++) {
             sx_mrt_blend_opt[i] =
@@ -15471,7 +15502,7 @@ radv_CmdDrawMeshTasksIndirect2EXT(VkCommandBuffer commandBuffer, const VkDrawInd
       return;
 
    if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
-      radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info);
+      radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info, 0);
    } else {
       radv_emit_indirect_mesh_draw_packets(pdev, cmd_buffer, &info);
    }
@@ -15526,7 +15557,23 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
       return;
 
    if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
-      radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info);
+      uint64_t workaround_cond_va = 0;
+
+      if (pdev->info.has_taskmesh_indirect0_bug && info.count_va) {
+         /* Allocate a 32-bit value for the MEC firmware bug workaround. */
+         uint32_t workaround_cond_init = 0;
+         uint32_t workaround_cond_off;
+
+         if (!radv_cmd_buffer_upload_data(cmd_buffer, 4, &workaround_cond_init, &workaround_cond_off)) {
+            vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+            return;
+         }
+
+         workaround_cond_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + workaround_cond_off;
+      }
+
+      radv_emit_indirect_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, &info,
+                                               workaround_cond_va);
    } else {
       radv_emit_indirect_mesh_draw_packets(pdev, cmd_buffer, &info);
    }
@@ -17027,6 +17074,12 @@ radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer, bool pws_defer_allowed
    /* PRE_DEPTH is only reachable by a graphics draw */
    if (pws_acquire_point == AC_PWS_ACQUIRE_POINT_PRE_DEPTH && !pws_defer_allowed)
       pws_acquire_point = AC_PWS_ACQUIRE_POINT_ME;
+
+   /* Xclipse: flush DB only through CACHE_FLUSH_AND_INV_TS, as the vendor does. */
+   if ((cmd_buffer->state.flush_bits & (AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_SYNC_AND_INV_CB)) ==
+          AC_BARRIER_SYNC_AND_INV_DB &&
+       ac_xclipse_full_db_flush(&pdev->info))
+      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_AND_INV_CB;
 
    radv_cs_emit_cache_flush(device->ws, cs, pdev->info.gfx_level, &cmd_buffer->eop_fence_idx, cmd_buffer->eop_fence_va,
                             cmd_buffer->state.flush_bits, &cmd_buffer->state.rgp_flush_bits, pws_acquire_point,

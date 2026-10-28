@@ -260,6 +260,22 @@ ac_xclipse_pbb(const struct radeon_info *info)
    return knob > 0 || pbb->on ? pbb : NULL;
 }
 
+/* RADV_XCLIPSE_DBFLUSH / debug.radv_xclipse_dbflush: flush DB with CACHE_FLUSH_AND_INV_TS (CB and DB
+ * together, as the vendor does on every Xclipse) instead of FLUSH_AND_INV_DB_DATA_TS plus
+ * FLUSH_AND_INV_DB_META, which the vendor never sends. Samsung's kernel (VOYAGERSW-1566, MGFX1-3):
+ * "DB has a limitation to handle concurrent z flush & request ... the problem disappears with
+ * removal of DB flush cache". On by default on every Xclipse; 0 = upstream. */
+bool
+ac_xclipse_full_db_flush(const struct radeon_info *info)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_int("RADV_XCLIPSE_DBFLUSH", "debug.radv_xclipse_dbflush", &src);
+   }
+   return info->xclipse_model != AC_XCLIPSE_NONE && knob != 0;
+}
+
 /* Like xclipse_knob_int but accepts 0x-prefixed hex, for register-shaped values. -1 = unset. */
 static int
 xclipse_knob_hex(const char *env_name, const char *prop_name, const char **src_out)
@@ -1038,16 +1054,22 @@ ac_fill_memory_info(struct radeon_info *info, const struct drm_amdgpu_info_devic
       info->num_tcc_blocks = info->max_tcc_blocks;
    }
 
-   /* Samsung Xclipse 920 (0x73a0): firmware reports num_tcc_blocks=0. It has VANGOGH's GL2 cache
-    * topology (4 TCC blocks); without this GL2 colour caching is disabled and images break. */
+   /* Samsung Xclipse 920 (0x73a0): early firmware reported num_tcc_blocks=0. It has VANGOGH's GL2
+    * cache topology (4 TCC blocks); without this GL2 colour caching is disabled and images break.
+    * Current kernels report it themselves (2026-10-28: 920 and 960 say 4, the 530 says 1), so this
+    * only covers old firmware. The 960's 4 against its 8 GB_ADDR_CONFIG pipes changes nothing:
+    * binning takes MAX2(8 RBs, tcc) and tcc_rb_non_coherent is false for any power of two. */
    if (device_info->device_id == 0x73a0 && info->max_tcc_blocks == 0) {
       info->max_tcc_blocks = 4;
       info->num_tcc_blocks = 4;
       info->tcc_cache_line_size = 128;
    }
 
-   RADV_LOGI("[MEM_INFO] max_tcc_blocks=%u num_tcc_blocks=%u tcc_cache_line=%u",
-             info->max_tcc_blocks, info->num_tcc_blocks, info->tcc_cache_line_size);
+   RADV_LOGI("[MEM_INFO] max_tcc_blocks=%u num_tcc_blocks=%u tcc_cache_line=%u (kernel: tcc %u "
+             "disabled 0x%" PRIx64 " gl2c %u KB)",
+             info->max_tcc_blocks, info->num_tcc_blocks, info->tcc_cache_line_size,
+             device_info->num_tcc_blocks, (uint64_t)device_info->tcc_disabled_mask,
+             device_info->gl2c_cache_size);
 
    /* Firmware wrongly reports 0 bytes of MALL being present on Navi33.
     * Work around this by manually computing cache sizes.

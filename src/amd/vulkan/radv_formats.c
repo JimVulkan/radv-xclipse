@@ -1213,6 +1213,9 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
        !(image_flags & VK_IMAGE_CREATE_2_CUBE_COMPATIBLE_BIT_KHR) &&
        !(image_usage & VK_IMAGE_USAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)) {
       sampleCounts |= VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT;
+      /* Xclipse: 8x resolves garbage; the vendor exposes 1/2/4 only. */
+      if (pdev->info.gfx11_shader_core)
+         sampleCounts &= ~VK_SAMPLE_COUNT_8_BIT;
    }
 
    if (tiling == VK_IMAGE_TILING_LINEAR && vk_format_is_96bit(format)) {

@@ -644,23 +644,52 @@ radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *me
       VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info_p = NULL;
       VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info;
       VkSubresourceLayout layouts[RADV_ANDROID_MAX_PLANES];
-      result = vk_android_get_ahb_layout(buffer, &mod_info, layouts, RADV_ANDROID_MAX_PLANES);
+      int plane_fds[RADV_ANDROID_MAX_PLANES] = {0};
+      result = vk_android_get_ahb_layout_fds(buffer, &mod_info, layouts, RADV_ANDROID_MAX_PLANES, plane_fds);
       if (result == VK_SUCCESS)
          mod_info_p = &mod_info;
 
+      /* Planes in a dma-buf of their own (Samsung NV12M) get their own BO, and the image is made
+       * disjoint so each plane is addressed from its binding; radv_BindImageMemory2() binds them. */
+      bool fd_planes = false;
+      for (unsigned i = 1; mod_info_p && i < mod_info.drmFormatModifierPlaneCount; i++) {
+         if (plane_fds[i] == plane_fds[0])
+            continue;
+         uint64_t plane_size = 0;
+         result = device->ws->buffer_from_fd(device->ws, plane_fds[i], priority, &mem->ahb_plane_bo[i - 1],
+                                             &plane_size);
+         if (result == VK_SUCCESS && plane_size < layouts[i].offset + layouts[i].rowPitch *
+                                                     DIV_ROUND_UP(mem->image->vk.extent.height, 2))
+            result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+         if (result != VK_SUCCESS) {
+            for (unsigned j = 0; j < ARRAY_SIZE(mem->ahb_plane_bo); j++) {
+               if (mem->ahb_plane_bo[j])
+                  radv_bo_destroy(device, NULL, mem->ahb_plane_bo[j]);
+               mem->ahb_plane_bo[j] = NULL;
+            }
+            radv_bo_destroy(device, NULL, mem->bo);
+            mem->bo = NULL;
+            return result;
+         }
+         fd_planes = true;
+      }
+
       const uint64_t modifier = mod_info_p ? mod_info.drmFormatModifier : DRM_FORMAT_MOD_INVALID;
       result = radv_image_init_layout(device, create_info, modifier, mod_info_p, NULL, mem->image);
+      if (result == VK_SUCCESS && alloc_size < mem->image->size)
+         result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
       if (result != VK_SUCCESS) {
+         for (unsigned j = 0; j < ARRAY_SIZE(mem->ahb_plane_bo); j++) {
+            if (mem->ahb_plane_bo[j])
+               radv_bo_destroy(device, NULL, mem->ahb_plane_bo[j]);
+            mem->ahb_plane_bo[j] = NULL;
+         }
          radv_bo_destroy(device, NULL, mem->bo);
          mem->bo = NULL;
          return result;
       }
-
-      if (alloc_size < mem->image->size) {
-         radv_bo_destroy(device, NULL, mem->bo);
-         mem->bo = NULL;
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-      }
+      if (fd_planes)
+         mem->image->disjoint = true;
    } else if (mem->buffer) {
       if (alloc_size < mem->buffer->vk.size) {
          radv_bo_destroy(device, NULL, mem->bo);

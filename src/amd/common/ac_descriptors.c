@@ -1312,7 +1312,11 @@ ac_set_mutable_ds_surface_fields(const struct radeon_info *info, const struct ac
          if (info->gfx_level >= GFX10) {
             const bool iterate256 = log_num_samples >= 1;
 
-            ds->db_z_info |= S_028040_ITERATE_FLUSH(1);
+            /* Xclipse 960 (8 pipes, 2 SEs): Z ITERATE_FLUSH breaks TC-compatible HTILE, an 8x8
+             * tile holding the clear value and one Z plane samples as the clear value
+             * (probe/gfx/shd). The vendor never sets it on any Xclipse, but the 920 under RADV
+             * needs it: without it the same probe fails there. */
+            ds->db_z_info |= S_028040_ITERATE_FLUSH(info->xclipse_model != AC_XCLIPSE_960);
             ds->db_stencil_info |= S_028044_ITERATE_FLUSH(!tile_stencil_disable);
             ds->db_z_info |= S_028040_ITERATE_256(iterate256);
             ds->db_stencil_info |= S_028044_ITERATE_256(iterate256);
@@ -1448,15 +1452,15 @@ ac_init_gfx10_cb_surface(const struct radeon_info *info, const struct ac_cb_stat
                              S_028C74_FORCE_DST_ALPHA_1_GFX6(force_dst_alpha_1);
       cb->cb_dcc_control |= S_028C78_INDEPENDENT_128B_BLOCKS_GFX10(surf->u.gfx9.color.dcc.independent_128B_blocks);
 
-      /* Xclipse 920: the CB reads CB_COLOR_ATTRIB in the GFX11 layout; with the GFX10_3 encoding
-       * partially covered MSAA draws hang. Encode like the vendor (0x12 for 4x: NUM_FRAGMENTS[0:1] +
-       * LIMIT_COLOR_FETCH_TO_256B_MAX bit4; bit4 must not be set on single-sample targets). */
+      /* Xclipse: the CB reads CB_COLOR_ATTRIB in a GFX11-like layout, NUM_FRAGMENTS in [0:1] and
+       * log2(samples) in [3:5] (vendor: 0x9 for 2x, 0x12 for 4x). Bits 3-5 are not the GFX11 flag
+       * bits: the old fixed bit 4 only matched at 4x, and 2x/8x resolved garbage. */
       if (info->gfx11_shader_core && state->num_storage_samples > 1) {
          /* Drop the GFX10_3 sample/fragment/FMASK fields [0:19] entirely. */
          cb->cb_color_attrib &= ~0xFFFFFu;
          cb->cb_color_attrib |= S_028C74_NUM_FRAGMENTS_GFX11(util_logbase2(state->num_storage_samples)) |
                                 S_028C74_FORCE_DST_ALPHA_1_GFX11(force_dst_alpha_1) |
-                                1u << 4; /* LIMIT_COLOR_FETCH_TO_256B_MAX (GFX11 position) */
+                                util_logbase2(state->num_samples) << 3;
       }
    }
 }

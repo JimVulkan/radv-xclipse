@@ -2116,6 +2116,18 @@ radv_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount, const VkBindImag
       const VkBindImagePlaneMemoryInfo *plane_info = NULL;
       uint32_t bind_idx = 0;
 
+      /* An AHardwareBuffer with planes in separate dma-bufs: radv_import_ahb_memory() made the
+       * image disjoint and imported the other planes' BOs, and the app binds the memory once. */
+      if (image->disjoint && (mem->ahb_plane_bo[0] || mem->ahb_plane_bo[1]) &&
+          !vk_find_struct_const(pBindInfos[i].pNext, BIND_IMAGE_PLANE_MEMORY_INFO)) {
+         for (uint32_t p = 0; p < image->plane_count; p++) {
+            struct radeon_winsys_bo *bo = p && mem->ahb_plane_bo[p - 1] ? mem->ahb_plane_bo[p - 1] : mem->bo;
+            radv_bind_image_memory(device, image, p, bo, radv_buffer_get_va(bo), 0,
+                                   image->planes[p].surface.total_size);
+         }
+         continue;
+      }
+
       if (image->disjoint) {
          plane_info = vk_find_struct_const(pBindInfos[i].pNext, BIND_IMAGE_PLANE_MEMORY_INFO);
          bind_idx = radv_plane_from_aspect(plane_info->planeAspect);

@@ -156,8 +156,7 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
    if (RADV_DEBUG(instance, NO_MESH_SHADER))
       return false;
 
-   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev) &&
-          !pdev->info.has_taskmesh_indirect0_bug;
+   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
 }
 
 bool
@@ -1295,6 +1294,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
        * gl_ViewportMask[] becomes gl_ViewportIndex (multi-bit broadcast is not implemented), and
        * the swizzle is folded into the last pre-raster stage. */
       .NV_geometry_shader_passthrough = true,
+      .NV_raw_access_chains = true,
       .NV_viewport_array2 = true,
       .NV_viewport_swizzle = true,
       .VALVE_mutable_descriptor_type = true,
@@ -1502,6 +1502,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* VK_KHR_compute_shader_derivatives */
       .computeDerivativeGroupQuads = true,
       .computeDerivativeGroupLinear = true,
+
+      /* VK_NV_raw_access_chains */
+      .shaderRawAccessChains = true,
 
       /* VK_EXT_ycbcr_image_arrays */
       .ycbcrImageArrays = true,
@@ -2097,7 +2100,8 @@ radv_init_image_properties(struct radv_physical_device *pdev)
 static void
 radv_get_physical_device_properties(struct radv_physical_device *pdev)
 {
-   VkSampleCountFlags sample_counts = 0xf;
+   /* Xclipse: 8x MSAA resolves garbage; the vendor exposes 1/2/4 only. */
+   VkSampleCountFlags sample_counts = pdev->info.gfx11_shader_core ? 0x7 : 0xf;
 
    size_t max_descriptor_set_size = radv_max_descriptor_set_size();
 
@@ -2488,7 +2492,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* VK_EXT_sample_locations */
       .sampleLocationSampleCounts = (pdev->info.gfx_level >= GFX10 ? VK_SAMPLE_COUNT_1_BIT : 0) |
-                                    VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT,
+                                    VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+                                    (pdev->info.gfx11_shader_core ? 0 : VK_SAMPLE_COUNT_8_BIT),
       .maxSampleLocationGridSize = (VkExtent2D){2, 2},
       .sampleLocationCoordinateRange = {0.0f, 0.9375f},
       .sampleLocationSubPixelBits = 4,
@@ -3109,6 +3114,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->xclipse_dcc = pdev->info.gfx11_shader_core && !radv_xclipse_flag_off("RADV_XCLIPSE_DCC", "radv_xclipse_dcc");
    pdev->xclipse_dcc_small =
       pdev->xclipse_dcc && !radv_xclipse_flag_off("RADV_XCLIPSE_DCC_SMALL", "radv_xclipse_dcc_small");
+   pdev->xclipse_llc = pdev->info.xclipse_model == AC_XCLIPSE_960 &&
+                       radv_xclipse_flag("RADV_XCLIPSE_LLC", "radv_xclipse_llc");
    /* The texture unit decodes ASTC and ETC2/EAC in hardware (codes measured, see
     * ac_xclipse_astc_img_format() and ac_xclipse_etc2_img_format()), so neither is emulated. */
    pdev->xclipse_native_astc = pdev->info.gfx11_shader_core;
@@ -3176,10 +3183,14 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 && !(RADV_DEBUG(instance, NO_NGG))) ||
       pdev->info.gfx_level >= GFX11;
 
-   /* TODO: Investigate if NGG culling helps on GFX11. */
+   /* TODO: Investigate if NGG culling helps on GFX11. Xclipse: off unless RADV_PERFTEST=nggc. It
+    * lost to no culling on the 920 and the 940 except with few, huge draws (2000 draws x 400 tris
+    * half back-facing: 2.21 vs 1.19 ms on the 920, 2.34 vs 0.73 ms on the 940), and on the 920 it
+    * also needs a VGT_FLUSH per draw (radv_before_draw). */
    pdev->use_ngg_culling = pdev->use_ngg &&
                            (pdev->info.gfx_level == GFX10 ||
-                            (pdev->info.gfx_level == GFX10_3 && pdev->info.family != CHIP_RAPHAEL_MENDOCINO) ||
+                            (pdev->info.gfx_level == GFX10_3 && pdev->info.family != CHIP_RAPHAEL_MENDOCINO &&
+                             pdev->info.xclipse_model == AC_XCLIPSE_NONE) ||
                             instance->perftest_flags & RADV_PERFTEST_NGGC) &&
                            !(RADV_DEBUG(instance, NO_NGGC));
 

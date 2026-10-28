@@ -40,6 +40,14 @@ radv_free_memory(struct radv_device *device, const VkAllocationCallbacks *pAlloc
       mem->bo = NULL;
    }
 
+   for (unsigned i = 0; i < ARRAY_SIZE(mem->ahb_plane_bo); i++) {
+      if (!mem->ahb_plane_bo[i])
+         continue;
+      device->ws->buffer_make_resident(device->ws, mem->ahb_plane_bo[i], false);
+      radv_bo_destroy(device, &mem->vk.base, mem->ahb_plane_bo[i]);
+      mem->ahb_plane_bo[i] = NULL;
+   }
+
    radv_rmv_log_resource_destroy(device, (uint64_t)radv_device_memory_to_handle(mem));
    vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
 }
@@ -239,6 +247,13 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       result = device->ws->buffer_make_resident(device->ws, mem->bo, true);
       if (result != VK_SUCCESS)
          goto fail;
+      for (unsigned i = 0; i < ARRAY_SIZE(mem->ahb_plane_bo); i++) {
+         if (!mem->ahb_plane_bo[i])
+            continue;
+         result = device->ws->buffer_make_resident(device->ws, mem->ahb_plane_bo[i], true);
+         if (result != VK_SUCCESS)
+            goto fail;
+      }
    }
 
    *pMem = radv_device_memory_to_handle(mem);
