@@ -240,6 +240,8 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
    ac_drm_device *dev;
    struct radv_amdgpu_winsys *ws = NULL;
 
+   *winsys = NULL;
+
    r = ac_drm_device_initialize(fd, is_virtio, &drm_major, &drm_minor, &dev);
    if (r) {
       fprintf(stderr, "radv/amdgpu: failed to initialize device.\n");
@@ -274,8 +276,10 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
          fprintf(stderr, "radv/amdgpu: Failed to create /tmp/radv_bo_history.log.\n");
    }
 
-   if (ac_drm_cs_create_syncobj2(ws->dev, 0, &ws->vm_timeline_syncobj))
+   if (ac_drm_cs_create_syncobj2(ws->dev, 0, &ws->vm_timeline_syncobj)) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
       goto winsys_fail;
+   }
 
    simple_mtx_init(&ws->vm_ioctl_lock, mtx_plain);
 
@@ -307,6 +311,8 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
    return result;
 
 winsys_fail:
+   if (ws->bo_history_logfile)
+      fclose(ws->bo_history_logfile);
    if (ws->alloc_tracker)
       radv_amdgpu_alloc_tracker_release(ws->alloc_tracker);
    free(ws);

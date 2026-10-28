@@ -620,6 +620,18 @@ bc_hist_init(struct radv_device *device)
    return true;
 }
 
+static bool
+bc_resources_init(struct radv_device *device)
+{
+   /* Command buffers may record their first BC decode concurrently. Do not let another thread
+    * use a BO until its mapping, contents and GPU address have all been initialized.
+    */
+   mtx_lock(&device->meta_state.mtx);
+   const bool initialized = bc_hist_init(device) && bc_eac_lut_init(device);
+   mtx_unlock(&device->meta_state.mtx);
+   return initialized;
+}
+
 /* Called from radv_device_finish_meta(). The BOs die with their device. */
 void
 radv_device_finish_meta_xclipse_bc(struct radv_device *device)
@@ -708,7 +720,7 @@ bc_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageL
       return;
    }
 
-   if (!bc_hist_init(device) || !bc_eac_lut_init(device)) {
+   if (!bc_resources_init(device)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
       return;
    }

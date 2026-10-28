@@ -581,8 +581,6 @@ static simple_mtx_t radv_xclipse_ibcache_lock = SIMPLE_MTX_INITIALIZER;
 static struct radv_xclipse_ibcache_entry radv_xclipse_ibcache[RADV_XCLIPSE_IBCACHE_BUCKETS];
 static unsigned radv_xclipse_ibcache_count;
 static uint64_t radv_xclipse_ibcache_bytes;
-/* Winsys being torn down, or NULL. park() refuses its BOs. */
-static struct radv_amdgpu_winsys *radv_xclipse_ibcache_dying;
 
 /* Is this BO safe to keep alive and hand back later? */
 static bool
@@ -612,7 +610,7 @@ radv_xclipse_ibcache_park(struct radv_amdgpu_winsys *ws, struct radv_amdgpu_wins
       return false;
 
    simple_mtx_lock(&radv_xclipse_ibcache_lock);
-   if (ws == radv_xclipse_ibcache_dying) {
+   if (ws->xclipse_ibcache_dying) {
       simple_mtx_unlock(&radv_xclipse_ibcache_lock);
       return false;
    }
@@ -697,20 +695,16 @@ void
 radv_xclipse_ibcache_winsys_begin_destroy(struct radv_amdgpu_winsys *ws)
 {
    simple_mtx_lock(&radv_xclipse_ibcache_lock);
-   radv_xclipse_ibcache_dying = ws;
+   ws->xclipse_ibcache_dying = true;
    simple_mtx_unlock(&radv_xclipse_ibcache_lock);
    radv_xclipse_ibcache_purge_ws(ws);
 }
 
-/* Before the winsys' device goes away: check nothing is left, then clear the marker. */
+/* Before the winsys' device goes away: check nothing is left. Parking stays disabled. */
 void
 radv_xclipse_ibcache_winsys_end_destroy(struct radv_amdgpu_winsys *ws)
 {
    radv_xclipse_ibcache_purge_ws(ws);
-   simple_mtx_lock(&radv_xclipse_ibcache_lock);
-   if (radv_xclipse_ibcache_dying == ws)
-      radv_xclipse_ibcache_dying = NULL;
-   simple_mtx_unlock(&radv_xclipse_ibcache_lock);
 }
 
 static void
