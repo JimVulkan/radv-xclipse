@@ -1569,6 +1569,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    }
 
    device->vk.sync = device->ws->get_sync_provider(device->ws);
+   if (!device->vk.sync) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail;
+   }
 
    /* Disable unordered submits when SQTT queue events are enabled because queue present events
     * might be missing otherwise.
