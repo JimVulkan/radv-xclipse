@@ -29,9 +29,9 @@ struct fallback_gralloc {
 
 /* returns # of fds, and by reference the actual fds */
 static unsigned
-get_native_buffer_fds(const native_handle_t *handle, int fds[3])
+get_native_buffer_fds(const native_handle_t *handle, int *fds, unsigned capacity)
 {
-   if (!handle)
+   if (!handle || handle->numFds <= 0 || (unsigned)handle->numFds > capacity)
       return 0;
 
    /*
@@ -235,7 +235,7 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
    int fds[3];
    int ret;
 
-   num_fds = get_native_buffer_fds(hnd->handle, fds);
+   num_fds = get_native_buffer_fds(hnd->handle, fds, ARRAY_SIZE(fds));
    if (num_fds == 0)
       return -EINVAL;
 
@@ -270,10 +270,10 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
       if (out->num_planes == 3)
          out->fds[2] = fds[0];
    } else {
-      assert(num_fds == out->num_planes);
-      out->fds[0] = fds[0];
-      out->fds[1] = fds[1];
-      out->fds[2] = fds[2];
+      if (num_fds != out->num_planes)
+         return -EINVAL;
+      for (unsigned i = 0; i < out->num_planes; i++)
+         out->fds[i] = fds[i];
    }
 
    return 0;

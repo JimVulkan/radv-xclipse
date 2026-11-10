@@ -98,12 +98,20 @@ evaluate_frame(struct vk_frame_pacer *frame_pacer, struct vk_frame_time_info *fr
    hash_table_foreach(&frame_pacer->queues, entry) {
       queue_context *queue_ctx = entry->data;
 
+      /* A submit owns this lock until it either reaches the driver or rolls back.
+       * Snapshot only committed timeline values, then release the query lock before
+       * waiting for the GPU so later frames can continue submitting on this queue.
+       */
+      ringbuffer_lock(queue_ctx->queries);
+      const uint64_t signal_value = queue_ctx->signal_value[frame_idx];
+      ringbuffer_unlock(queue_ctx->queries);
+
       /* Wait for the timeline semaphore of the frame to be signaled. */
       struct VkSemaphoreWaitInfo wait_info = {
          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
          .semaphoreCount = 1,
          .pSemaphores = &queue_ctx->semaphore,
-         .pValues = &queue_ctx->signal_value[frame_idx],
+         .pValues = &signal_value,
       };
       VkResult res = device->dispatch_table.WaitSemaphores(_device, &wait_info, timeout);
 
@@ -120,9 +128,8 @@ evaluate_frame(struct vk_frame_pacer *frame_pacer, struct vk_frame_time_info *fr
    hash_table_foreach(&frame_pacer->queues, entry) {
       queue_context *queue_ctx = entry->data;
 
-      /* As this function must be externally synchronized and is the only place where queries are
-       * free'd, we don't need to lock the query ringbuffer here in order to read the first entry.
-       */
+      /* Keep query consumption and failed-submit rollback mutually exclusive. */
+      ringbuffer_lock(queue_ctx->queries);
       struct query *query_begin = ringbuffer_first(queue_ctx->queries);
       uint32_t query_idx = ringbuffer_index(queue_ctx->queries, query_begin);
       int num_timestamps = MIN2(queue_ctx->num_submits[frame_idx] * 2, MAX_QUERIES - query_idx);
@@ -163,7 +170,6 @@ evaluate_frame(struct vk_frame_pacer *frame_pacer, struct vk_frame_time_info *fr
          query_idx = ringbuffer_index(queue_ctx->queries, query_begin);
 
          /* Free queries. */
-         ringbuffer_lock(queue_ctx->queries);
          {
             /* Ensure that the total number of queries across all frames is correct. */
             ASSERTED uint32_t submit_count = 0;
@@ -173,13 +179,13 @@ evaluate_frame(struct vk_frame_pacer *frame_pacer, struct vk_frame_time_info *fr
 
             ringbuffer_free_n(queue_ctx->queries, num_timestamps);
          }
-         ringbuffer_unlock(queue_ctx->queries);
 
          /* Process the remaining timestamps if any. */
          queue_ctx->num_submits[frame_idx] -= num_timestamps / 2;
          num_timestamps = queue_ctx->num_submits[frame_idx] * 2;
       }
       assert(queue_ctx->num_submits[frame_idx] == 0);
+      ringbuffer_unlock(queue_ctx->queries);
    }
 
    /* Populate vk_frame_time_info. */
@@ -443,31 +449,39 @@ frame_pacer_QueueSubmit2(VkQueue _queue, uint32_t submitCount, const VkSubmitInf
    /* Get timestamp commandbuffers. */
    VkCommandBuffer timestamps[2];
    VkSemaphoreSubmitInfo semaphore_info;
+   const uint32_t query_head = queue_ctx->queries.head;
+   const uint32_t query_size = queue_ctx->queries.size;
+   const uint64_t semaphore_value = queue_ctx->semaphore_value;
+   const uint64_t signal_value = queue_ctx->signal_value[frame_idx];
+   const uint8_t num_submits = queue_ctx->num_submits[frame_idx];
    if (!need_query || !get_timestamp_queries(frame_pacer, queue_ctx, timestamps, &semaphore_info)) {
       ringbuffer_unlock(queue_ctx->queries);
       ringbuffer_unlock(frame_pacer->frames);
       return frame_pacer->queue_submit2(_queue, submitCount, pSubmits, fence);
    }
 
-   /* End critical section for externally synchronized queues:
-    * As we incremented the timeline semaphore value, we know for sure that the frame_pacer
-    * won't be disabled until this submission completed and got signalled. Thus, it's safe
-    * to use the semaphore without synchronization.
+   /* Release the global frame lock before calling the driver, so independent queues
+    * can submit concurrently. Keep this queue's query lock through submission and
+    * rollback; evaluators must not observe an unsent timeline value.
     */
-   if (!(queue->flags & VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR))
-      ringbuffer_unlock(queue_ctx->queries);
    ringbuffer_unlock(frame_pacer->frames);
 
    /* Submit with added timestamp query commandbuffers. */
    VkResult res = frame_pacer_submit(frame_pacer, _queue, submitCount, pSubmits, fence,
                                      early_submit, first, timestamps, &semaphore_info);
 
-   /* For internally synchronized queues, make sure that the submissions are kept
-    * in-order, so that the semaphore can't get destroyed before the submission
-    * completed.
+   /* Vulkan requires OOM submissions to leave synchronization and resource state
+    * untouched. No timestamp command buffers ran, so return their reservations.
+    * This also covers allocation failure in frame_pacer_submit before driver entry.
     */
-   if (queue->flags & VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR)
-      ringbuffer_unlock(queue_ctx->queries);
+   if (res == VK_ERROR_OUT_OF_HOST_MEMORY || res == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+      queue_ctx->queries.head = query_head;
+      queue_ctx->queries.size = query_size;
+      queue_ctx->semaphore_value = semaphore_value;
+      queue_ctx->signal_value[frame_idx] = signal_value;
+      queue_ctx->num_submits[frame_idx] = num_submits;
+   }
+   ringbuffer_unlock(queue_ctx->queries);
 
    return res;
 }

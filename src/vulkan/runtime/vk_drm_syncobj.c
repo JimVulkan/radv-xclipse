@@ -690,6 +690,9 @@ vk_drm_syncobj_copy_payloads(struct vk_device *device,
 struct vk_sync_type
 vk_drm_syncobj_get_type_from_provider(struct util_sync_provider *sync)
 {
+   if (!sync)
+      return (struct vk_sync_type) { .features = 0 };
+
    uint32_t syncobj = 0;
    int err = sync->create(sync, DRM_SYNCOBJ_CREATE_SIGNALED, &syncobj);
    if (err < 0)
@@ -740,6 +743,8 @@ struct vk_sync_type
 vk_drm_syncobj_get_type(int drm_fd)
 {
    struct util_sync_provider *sync = util_sync_provider_drm(drm_fd);
+   if (!sync)
+      return (struct vk_sync_type) { .features = 0 };
    struct vk_sync_type ret = vk_drm_syncobj_get_type_from_provider(sync);
    sync->finalize(sync);
    return ret;

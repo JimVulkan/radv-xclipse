@@ -120,6 +120,8 @@ struct util_sync_provider *
 util_sync_provider_drm(int drm_fd)
 {
    struct util_sync_provider_drm *d = CALLOC_STRUCT(util_sync_provider_drm);
+   if (!d)
+      return NULL;
 
    d->drm_fd = drm_fd;
    d->base = (struct util_sync_provider) {
