@@ -111,7 +111,19 @@ ac_map_swizzle(unsigned swizzle)
 void
 ac_build_sampler_descriptor(const enum amd_gfx_level gfx_level, const struct ac_sampler_state *state, uint32_t desc[4])
 {
-   const unsigned perf_mip = state->max_aniso_ratio ? state->max_aniso_ratio + 6 : 0;
+   unsigned perf_mip = state->max_aniso_ratio ? state->max_aniso_ratio + 6 : 0;
+   unsigned aniso_threshold = state->max_aniso_ratio >> 1;
+   unsigned aniso_bias = state->max_aniso_ratio;
+
+   /* Xclipse: the vendor's samplers carry PERF_MIP 15 whatever the filter, plus the AMD anisotropic
+    * threshold and bias (read back from its descriptor memory on the 920). The texture descriptor
+    * decides whether they apply, see PERF_MOD in ac_build_gfx10_texture_descriptor. */
+   if (state->xclipse_aniso) {
+      const unsigned opt = ac_xclipse_texture_filter_opt();
+      perf_mip = opt & 0xf;
+      if (!(opt & 0x10))
+         aniso_threshold = aniso_bias = 0;
+   }
    const bool compat_mode = gfx_level == GFX8 || gfx_level == GFX9;
 
    desc[0] = S_008F30_CLAMP_X(state->address_mode_u) |
@@ -120,8 +132,8 @@ ac_build_sampler_descriptor(const enum amd_gfx_level gfx_level, const struct ac_
              S_008F30_MAX_ANISO_RATIO(state->max_aniso_ratio) |
              S_008F30_DEPTH_COMPARE_FUNC(state->depth_compare_func) |
              S_008F30_FORCE_UNNORMALIZED(state->unnormalized_coords) |
-             S_008F30_ANISO_THRESHOLD(state->max_aniso_ratio >> 1) |
-             S_008F30_ANISO_BIAS(state->max_aniso_ratio) |
+             S_008F30_ANISO_THRESHOLD(aniso_threshold) |
+             S_008F30_ANISO_BIAS(aniso_bias) |
              S_008F30_DISABLE_CUBE_WRAP(!state->cube_wrap) |
              S_008F30_COMPAT_MODE(compat_mode) |
              S_008F30_TRUNC_COORD(state->trunc_coord) |
@@ -628,7 +640,19 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
     * In SRV mode, BASE_ARRAY is ignored and DEPTH is the last slice of mipmap level 0.
     * In UAV mode, BASE_ARRAY is the first slice and DEPTH is the last slice of the bound level.
     */
-   desc[5] = S_00A014_ARRAY_PITCH(state->gfx10.uav3d) | S_00A014_PERF_MOD(4);
+   /* Xclipse: PERF_MOD scales the sampler's PERF_MIP and anisotropic bias, 0 turns them off. The
+    * vendor uses 4, and 0 on mipmapped textures of up to 256x256 (probe/gfx/perfax fill_tex and
+    * fill_aniso over 25 texture shapes on the 920: 256x256, 256x128, 255x255, 200x200, 128x128,
+    * 64x64 and 32x32 with mips filter exactly, 257x257, 260x252, 256x300, 512x64, 128x1024 and
+    * single-level 256x256 and 128x128 take the optimised path). With these the sampled values are
+    * the vendor's on both sides of the limit, and large textures cost what they cost there:
+    * trilinear 8-tap +23%, 8x anisotropic +46% on the 920. */
+   unsigned perf_mod = 4;
+   if (info->xclipse_model != AC_XCLIPSE_NONE && ac_xclipse_texture_filter_opt() &&
+       state->num_levels > 1 && state->width <= 256 && state->height <= 256)
+      perf_mod = 0;
+
+   desc[5] = S_00A014_ARRAY_PITCH(state->gfx10.uav3d) | S_00A014_PERF_MOD(perf_mod);
    desc[6] = 0;
    desc[7] = 0;
 

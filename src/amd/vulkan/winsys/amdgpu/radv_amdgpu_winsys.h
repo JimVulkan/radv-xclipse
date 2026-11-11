@@ -54,6 +54,9 @@ struct radv_amdgpu_winsys {
 
    struct radv_amdgpu_alloc_tracker *alloc_tracker;
 
+   /* Protected by radv_xclipse_ibcache_lock. Each winsys can be destroyed independently. */
+   bool xclipse_ibcache_dying;
+
    /* Global BO list */
    struct {
       struct radv_amdgpu_winsys_bo **bos;

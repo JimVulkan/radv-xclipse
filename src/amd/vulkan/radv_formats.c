@@ -717,6 +717,24 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
       linear |= VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
    }
 
+   /* Xclipse samples depth, 16-bit UNORM/SNORM and 32-bit float channels with nearest filtering
+    * even when the sampler asks for linear (probe/gfx/texfx on the 920 and 960: the midpoint of
+    * two texels reads the second texel). The vendor driver advertises no linear filtering for
+    * exactly these 13 formats (probe/gfx/fmtfeat), so neither do we. Found in paulowesll/mesa
+    * 86f8dbcb99. */
+   if (pdev->info.xclipse_model != AC_XCLIPSE_NONE && desc->layout == UTIL_FORMAT_LAYOUT_PLAIN) {
+      bool nearest_only = vk_format_has_depth(format);
+      for (unsigned c = 0; c < desc->nr_channels; c++) {
+         if ((desc->channel[c].size == 16 && desc->channel[c].normalized) ||
+             (desc->channel[c].size == 32 && desc->channel[c].type == UTIL_FORMAT_TYPE_FLOAT))
+            nearest_only = true;
+      }
+      if (nearest_only) {
+         tiled &= ~VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+         linear &= ~VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      }
+   }
+
    /* The Xclipse 920 texture unit only decodes BC1-BC3. BC4-BC7 are emulated (decoded into a hidden
     * plane at upload, radv_meta_bc_decode.c): sampleable, never storage or colour attachments. */
    if (pdev->info.gfx11_shader_core && radv_bc_emulation_format(format) != VK_FORMAT_UNDEFINED) {

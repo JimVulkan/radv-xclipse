@@ -575,6 +575,7 @@ struct radv_compiler_info {
       uint32_t nggc_max_ps_params : 4;
       uint32_t no_ngg_gs : 1;
       uint32_t load_grid_size_from_user_sgpr : 1;
+      uint32_t xclipse_taskmesh_emul : 1;
       uint32_t emulate_ngg_gs_query_pipeline_stat : 1;
       uint32_t primitives_generated_query : 1;
       uint32_t mesh_shader_queries : 1;
@@ -605,7 +606,7 @@ struct radv_compiler_info {
       uint32_t gfx10_descriptor_alias_robust : 1;
       uint32_t nir_debug_info : 1;
       uint32_t use_elf : 1;
-      uint32_t padding : 25;
+      uint32_t padding : 24;
 
       int32_t force_aniso;
 

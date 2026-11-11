@@ -6,8 +6,9 @@ overview. The files below are under other licenses. Full license texts are in `L
 
 Meson fetches these at configure time (not in this repository): libdrm 2.4.133 (MIT) and
 zlib 1.3.1 (Zlib), both linked into the driver, and Expat 2.5.0 (MIT), which is not. The
-notices for everything compiled into the driver are in `android/NOTICE.txt`, which the
-package includes.
+glibc build also fetches wayland-protocols 1.41 (MIT), whose generated code is compiled
+in. The notices for everything compiled into the driver are in `android/NOTICE.txt` and
+`linux/NOTICE.txt`, which the packages include.
 
 ## Apache-2.0
 
@@ -77,6 +78,9 @@ Text: `LICENSES/Apache-2.0.txt`, `LICENSES/MIT.txt`
 - `include/vulkan/vulkan_android.h`
 - `include/vulkan/vulkan_core.h`
 - `include/vulkan/vulkan_wayland.h`
+- `include/vulkan/vulkan_xcb.h`
+- `include/vulkan/vulkan_xlib.h`
+- `include/vulkan/vulkan_xlib_xrandr.h`
 - `src/vulkan/registry/vk.xml`
 
 ## BSD-2-Clause

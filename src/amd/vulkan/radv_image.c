@@ -1379,6 +1379,11 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
          stride = 0; /* 0 means no override */
          if (plane == 1 && radv_xclipse_bc_can_alias(pdev, image, &create_info)) {
             offset = image->planes[0].surface.u.gfx9.surf_offset;
+            /* The planes share memory, so they must share the tile swizzle (pipe/bank XOR) as well.
+             * Each surface draws its own, and with plane 0 at 64 and plane 1 at 0 the transcode (plane 1)
+             * and every copy (plane 0) addressed mips 3 and 4 of a 1024x1024 BC5 differently: an
+             * image-to-image copy left them zero (probe/gfx/fo4bc5, Fallout 4 normal maps). */
+            image->planes[1].surface.tile_swizzle = image->planes[0].surface.tile_swizzle;
             image->xclipse_bc_alias = true;
          }
       }
@@ -1386,8 +1391,9 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       if (!ac_surface_override_offset_stride(&pdev->info, &image->planes[plane].surface, image->vk.array_layers,
                                              image->vk.mip_levels, offset, stride)) {
          if (ac_xclipse_log_level() >= 1)
-            mesa_logi("[ANB-FAIL] ac_surface_override_offset_stride rejected offset=%" PRIu64 " stride=%u bpe=%u",
-                      offset, stride, image->planes[plane].surface.bpe);
+            mesa_logi("[ANB-FAIL] ac_surface_override_offset_stride rejected offset=%" PRIu64 " stride=%u bpe=%u (surface pitch %u, sw %u)",
+                      offset, stride, image->planes[plane].surface.bpe,
+                      image->planes[plane].surface.u.gfx9.surf_pitch, image->planes[plane].surface.u.gfx9.swizzle_mode);
          return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
       }
 

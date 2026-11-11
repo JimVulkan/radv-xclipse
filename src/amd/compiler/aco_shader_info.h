@@ -169,6 +169,12 @@ struct aco_compiler_options {
     * rotate across the two 32-lane halves returned 0 (sgprobe 64; flicker in Eden). Cross-half
     * wave64 permutes use the per-lane readlane emulation instead. */
    bool no_permlane64;
+   /* LDS_PARAM_LOAD waits for every outstanding VALU (wait_vdst 0), as the vendor compiler does.
+    * An older VALU write to the load's destination VGPR can land after the load even when the
+    * GFX11 va_vdst count has passed, and the fragment input then reads the stale value
+    * (paulowesll/mesa a0191be5f8: a flat input returned a v_min3_f32 result issued 7 VALUs
+    * earlier). */
+   bool ldsdir_valu_drain;
    /* Global/scratch immediate offsets are 12-bit signed (-2048..2047) as on RDNA2, although the
     * GFX11 encoding has a 13-bit field. Measured on the Xclipse 920 (probe/gfx/rt/goffprobe): a
     * global access at +2800 or +4092 lands 4 KiB low. */

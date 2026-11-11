@@ -237,6 +237,7 @@ radv_make_sampler_descriptor(const struct radv_compiler_info *compiler_info,
       .max_lod = sampler_state->max_lod,
       .lod_bias = sampler_state->mip_lod_bias,
       .aniso_single_level = !compiler_info->key.disable_aniso_single_level,
+      .xclipse_aniso = compiler_info->hw.gfx11_isa, /* every Xclipse */
       .border_color_type = radv_tex_bordercolor(border_color),
       .border_color_ptr = border_color_ptr,
    };

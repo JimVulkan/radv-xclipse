@@ -263,7 +263,7 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
 
 bool
 ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
-                                 bool has_query);
+                                 bool has_query, bool draw_indirect);
 
 bool
 ac_nir_lower_mesh_inputs_to_mem(nir_shader *shader, bool has_task_shader);
@@ -494,6 +494,10 @@ ac_nir_lower_bit_size_callback(const nir_instr *instr, void *data);
 
 bool
 ac_nir_might_lower_bit_size(const nir_shader *shader);
+
+bool
+ac_nir_can_increase_load_size(uint32_t align_mul, uint32_t align_offset, unsigned old_size,
+                              unsigned new_size);
 
 bool
 ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigned bit_size,

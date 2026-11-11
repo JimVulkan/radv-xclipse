@@ -266,6 +266,48 @@ radv_set_ring_buffer(const struct radv_physical_device *pdev, struct radeon_wins
    ac_build_buffer_descriptor(pdev->info.desc_gfx_level, &ac_state, desc);
 }
 
+/* Xclipse task/mesh emulation: one draw + payload ring BO for the whole device, because the
+ * command buffer needs its address at record time (the draw ring is the DRAW_INDIRECT buffer).
+ * The first 256 bytes hold the ring descriptor table the task shader reads. */
+struct radeon_winsys_bo *
+radv_xclipse_task_bo(struct radv_device *device)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   struct radeon_winsys_bo *bo = p_atomic_read(&device->xclipse_task_bo);
+
+   if (bo)
+      return bo;
+
+   VkResult result = radv_bo_create(device, NULL, pdev->task_info.bo_size_bytes, 256, RADEON_DOMAIN_VRAM,
+                                    RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING,
+                                    RADV_BO_PRIORITY_SCRATCH, 0, true, &bo);
+   if (result != VK_SUCCESS)
+      return NULL;
+
+   uint32_t *map = radv_buffer_map(device->ws, bo);
+   if (!map) {
+      radv_bo_destroy(device, NULL, bo);
+      return NULL;
+   }
+
+   STATIC_ASSERT((RING_TS_PAYLOAD + 1) * 16 <= 256);
+   memset(map, 0, 256);
+   radv_set_ring_buffer(pdev, bo, pdev->task_info.draw_ring_offset,
+                        pdev->task_info.num_entries * AC_TASK_DRAW_ENTRY_BYTES, false, false, false, 0, 0,
+                        &map[RING_TS_DRAW * 4]);
+   radv_set_ring_buffer(pdev, bo, pdev->task_info.payload_ring_offset,
+                        pdev->task_info.num_entries * pdev->task_info.payload_entry_size, false, false, false, 0, 0,
+                        &map[RING_TS_PAYLOAD * 4]);
+   device->ws->buffer_unmap(device->ws, bo, false);
+
+   struct radeon_winsys_bo *prev = p_atomic_cmpxchg(&device->xclipse_task_bo, NULL, bo);
+   if (prev) {
+      radv_bo_destroy(device, NULL, bo);
+      return prev;
+   }
+   return bo;
+}
+
 static void
 radv_fill_shader_rings(struct radv_device *device, uint32_t *desc, struct radeon_winsys_bo *scratch_bo,
                        uint32_t esgs_ring_size, struct radeon_winsys_bo *esgs_ring_bo, uint32_t gsvs_ring_size,
@@ -1088,6 +1130,13 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
        */
       uint32_t task_rings_bo_flags = RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
+      if (pdev->xclipse_taskmesh_emul) {
+         task_rings_bo = radv_xclipse_task_bo(device);
+         if (!task_rings_bo) {
+            result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            goto fail;
+         }
+      } else {
       result = radv_bo_create(device, NULL, pdev->task_info.bo_size_bytes, 256, RADEON_DOMAIN_VRAM, task_rings_bo_flags,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &task_rings_bo);
       if (result != VK_SUCCESS)
@@ -1097,6 +1146,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       result = radv_initialise_task_control_buffer(device, task_rings_bo);
       if (result != VK_SUCCESS)
          goto fail;
+      }
    }
 
    if (!queue->ring_info.mesh_scratch_ring && needs->mesh_scratch_ring) {
@@ -1244,13 +1294,16 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
          break;
       }
 
-      if (i < 2 || task_rings_bo) {
+      /* Firmware task rings only; the Xclipse emulation synchronises around each task draw. */
+      const bool fw_task_rings = task_rings_bo && !pdev->xclipse_taskmesh_emul;
+
+      if (i < 2 || fw_task_rings) {
          /* The two initial preambles have a cache flush at the beginning. */
          const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
          enum ac_barrier_flags flush_bits = AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM |
                                             AC_BARRIER_INV_L2 | AC_BARRIER_PIPELINESTAT_START;
 
-         if (i == 0 || task_rings_bo) {
+         if (i == 0 || fw_task_rings) {
             /* The full flush preamble should also wait for previous shader work to finish. */
             flush_bits |= AC_BARRIER_SYNC_CS;
             if (queue->qf == RADV_QUEUE_GENERAL)
@@ -1264,8 +1317,10 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
        * to make sure that we aren't reading stale data from cache
        * and that a previous submission isn't perturbing the BO.
        */
-      if (task_rings_bo)
+      if (fw_task_rings)
          radv_emit_task_rings(device, cs, task_rings_bo, queue->qf == RADV_QUEUE_COMPUTE);
+      else if (task_rings_bo)
+         radv_cs_add_buffer(ws, cs->b, task_rings_bo);
 
       result = radv_finalize_cmd_stream(device, cs);
       if (result != VK_SUCCESS)
@@ -1347,7 +1402,7 @@ fail:
       radv_bo_destroy(device, NULL, gsvs_ring_bo);
    if (tess_rings_bo && tess_rings_bo != queue->tess_rings_bo)
       radv_bo_destroy(device, NULL, tess_rings_bo);
-   if (task_rings_bo && task_rings_bo != queue->task_rings_bo)
+   if (task_rings_bo && task_rings_bo != queue->task_rings_bo && !pdev->xclipse_taskmesh_emul)
       radv_bo_destroy(device, NULL, task_rings_bo);
    if (ge_rings_bo && ge_rings_bo != queue->ge_rings_bo)
       radv_bo_destroy(device, NULL, ge_rings_bo);
@@ -2239,7 +2294,7 @@ radv_queue_state_finish(struct radv_queue_state *queue, struct radv_device *devi
       radv_rmv_log_command_buffer_bo_destroy(device, queue->tess_rings_bo);
       radv_bo_destroy(device, NULL, queue->tess_rings_bo);
    }
-   if (queue->task_rings_bo) {
+   if (queue->task_rings_bo && queue->task_rings_bo != device->xclipse_task_bo) {
       radv_rmv_log_command_buffer_bo_destroy(device, queue->task_rings_bo);
       radv_bo_destroy(device, NULL, queue->task_rings_bo);
    }

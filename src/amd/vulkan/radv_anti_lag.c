@@ -101,6 +101,12 @@ radv_AntiLagUpdateAMD(VkDevice _device, const VkAntiLagDataAMD *pData)
    if (pData->mode == VK_ANTI_LAG_MODE_OFF_AMD) {
       /* Application request to disable Anti-Lag. */
       vk_frame_pacer_disable(frame_pacer);
+      /* Resume with fresh measurements instead of pacing from an old workload. */
+      data->avg_frame_time = 0;
+      data->deviation = 0;
+      data->prev_input_begin = 0;
+      data->queuing_delay = 0;
+      data->recalibrate_when = 0;
       simple_mtx_unlock(&data->mtx);
       return;
    }

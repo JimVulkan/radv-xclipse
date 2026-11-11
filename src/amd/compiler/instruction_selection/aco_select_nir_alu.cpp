@@ -196,10 +196,9 @@ emit_sop2_instruction(isel_context* ctx, nir_alu_instr* instr, aco_opcode op, Te
 void
 emit_vop2_instruction(isel_context* ctx, nir_alu_instr* instr, aco_opcode opc, Temp dst,
                       bool commutative, bool swap_srcs = false, bool flush_denorms = false,
-                      bool nuw = false, uint8_t uses_ub = 0)
+                      uint8_t uses_ub = 0)
 {
    Builder bld = create_alu_builder(ctx, instr);
-   bld.is_nuw = nuw;
 
    Operand operands[2] = {Operand(get_alu_src(ctx, instr->src[0])),
                           Operand(get_alu_src(ctx, instr->src[1]))};
@@ -1109,8 +1108,7 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       } else if (dst.regClass() == v1 && instr->def.bit_size == 16) {
          emit_pk_shift(ctx, instr, aco_opcode::v_pk_lshlrev_b16, dst);
       } else if (dst.regClass() == v1) {
-         emit_vop2_instruction(ctx, instr, aco_opcode::v_lshlrev_b32, dst, false, true, false,
-                               false, 1);
+         emit_vop2_instruction(ctx, instr, aco_opcode::v_lshlrev_b32, dst, false, true, false, 1);
       } else if (dst.regClass() == v2 && ctx->program->gfx_level >= GFX12) {
          emit_vop2_instruction(ctx, instr, aco_opcode::v_lshlrev_b64, dst, false, true);
       } else if (dst.regClass() == v2 && ctx->program->gfx_level >= GFX8) {
@@ -1777,9 +1775,8 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          uint32_t src1_ub = get_alu_src_ub(ctx, instr, 1);
 
          if (src0_ub <= 0xffffff && src1_ub <= 0xffffff) {
-            bool nuw_16bit = src0_ub <= 0xffff && src1_ub <= 0xffff && src0_ub * src1_ub <= 0xffff;
             emit_vop2_instruction(ctx, instr, aco_opcode::v_mul_u32_u24, dst,
-                                  true /* commutative */, false, false, nuw_16bit, 0x3);
+                                  true /* commutative */, false, false, 0x3);
          } else if (nir_src_is_const(instr->src[0].src)) {
             bld.v_mul_imm(Definition(dst), get_alu_src(ctx, instr->src[1]),
                           nir_src_as_uint(instr->src[0].src), src1_ub <= 0xffffff,
@@ -1788,8 +1785,15 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
             bld.v_mul_imm(Definition(dst), get_alu_src(ctx, instr->src[0]),
                           nir_src_as_uint(instr->src[1].src), src0_ub <= 0xffffff,
                           src0_ub <= 0x7fffff);
+         } else if ((src0_ub <= UINT16_MAX || src1_ub <= UINT16_MAX) &&
+                    ctx->program->gfx_level >= GFX9) {
+            bool swap = src0_ub <= UINT16_MAX;
+            Temp src0 = get_alu_src(ctx, instr->src[swap]);
+            Temp src1 = get_alu_src(ctx, instr->src[!swap]);
+            bld.vop3(aco_opcode::p_v_mad_u32_u32_u16, Definition(dst), src0, src1, Operand::c32(0));
          } else {
-            emit_vop3a_instruction(ctx, instr, aco_opcode::v_mul_lo_u32, dst);
+            bld.v_mul_u32(Definition(dst), get_alu_src(ctx, instr->src[0]),
+                          get_alu_src(ctx, instr->src[1]));
          }
       } else if (dst.regClass() == s1) {
          emit_sop2_instruction(ctx, instr, aco_opcode::s_mul_i32, dst, false, 0x3);
@@ -1817,7 +1821,7 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          bld.sop2(aco_opcode::s_mul_i32, Definition(dst), op1, op2);
       } else if (dst.regClass() == v1) {
          emit_vop2_instruction(ctx, instr, aco_opcode::v_mul_u32_u24, dst, true /* commutative */,
-                               false, false, false, 0x3);
+                               false, false, 0x3);
       } else {
          isel_err(&instr->instr, "Unimplemented NIR instr bit size");
       }
@@ -3265,6 +3269,12 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
             bld.pseudo(aco_opcode::p_insert, Definition(dst), bld.def(s1, scc), src1,
                        Operand::c32(1), Operand::c32(16));
          }
+      } else if (instr->src[0].src.ssa == instr->src[1].src.ssa &&
+                 (instr->src[0].swizzle[0] & 0x1) == 0 && (instr->src[1].swizzle[0] & 0x1) == 1 &&
+                 (instr->src[0].swizzle[0] & ~0x1) == (instr->src[1].swizzle[0] & ~0x1)) {
+         bld.copy(Definition(dst),
+                  emit_extract_vector(ctx, get_ssa_temp(ctx, instr->src[0].src.ssa),
+                                      instr->src[0].swizzle[0] / 2, s1));
       } else if (ctx->program->gfx_level >= GFX9) {
          bld.sop2(aco_opcode::s_pack_ll_b32_b16, Definition(dst), src0, src1);
       } else {

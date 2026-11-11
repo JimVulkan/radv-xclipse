@@ -94,6 +94,7 @@ nir_shader *radv_meta_nir_build_resolve_fs(bool use_fmask, uint32_t samples, boo
 nir_shader *radv_meta_nir_build_clear_hiz_compute_shader(uint32_t samples);
 
 nir_shader *radv_meta_nir_build_copy_memory_indirect_preprocess_cs(void);
+nir_shader *radv_meta_nir_build_xclipse_mesh_tasks_cs(void);
 nir_shader *radv_meta_nir_build_copy_memory_indirect_cs(void);
 
 nir_shader *radv_meta_nir_build_copy_memory_to_image_indirect_preprocess_cs(void);

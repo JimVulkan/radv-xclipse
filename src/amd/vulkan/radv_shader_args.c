@@ -306,10 +306,12 @@ declare_tes_input_vgprs(struct radv_shader_args_state *state)
 }
 
 static void
-declare_ms_input_sgprs(struct radv_shader_args_state *state, const struct radv_shader_info *info)
+declare_ms_input_sgprs(const struct radv_compiler_info *compiler_info, struct radv_shader_args_state *state,
+                       const struct radv_shader_info *info)
 {
    if (info->cs.uses_grid_size) {
-      RADV_ADD_UD_ARG(state, 3, AC_ARG_VALUE, ac.num_work_groups, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
+      /* Xclipse: x | y << 16 and z, the two words DRAW_INDIRECT can deliver. */
+      RADV_ADD_UD_ARG(state, compiler_info->key.xclipse_taskmesh_emul ? 2 : 3, AC_ARG_VALUE, ac.num_work_groups, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
    }
    if (info->vs.needs_draw_id) {
       RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.draw_id, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
@@ -824,7 +826,7 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
             if (previous_stage == MESA_SHADER_VERTEX) {
                declare_vs_specific_input_sgprs(state, info);
             } else if (previous_stage == MESA_SHADER_MESH) {
-               declare_ms_input_sgprs(state, info);
+               declare_ms_input_sgprs(compiler_info, state, info);
             }
 
             declare_global_input_sgprs(state, gfx_level, info, user_sgpr_info);

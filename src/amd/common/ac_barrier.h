@@ -105,6 +105,12 @@ struct ac_barrier_state {
    uint64_t wait_mem_va;
    uint32_t *wait_mem_number;
    uint64_t eop_bug_va;
+
+   /* Xclipse: the Mesa 26.3 barrier sequence (gfx10_cs_emit_cache_flush). A CB/DB TS event keeps
+    * the CS_PARTIAL_FLUSH before it, and every CB/DB flush sends FLUSH_AND_INV_CB_META /
+    * FLUSH_AND_INV_DB_META first, whichever TS event follows. 27.0 dropped both, and the A55
+    * (530) freezes came back with 27.0. */
+   bool xclipse_legacy_sync;
 };
 
 void

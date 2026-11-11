@@ -128,6 +128,7 @@ enum radv_meta_object_key_type {
    RADV_META_OBJECT_KEY_QUERY_TIMESTAMP,
    RADV_META_OBJECT_KEY_QUERY_PRIMS_GEN,
    RADV_META_OBJECT_KEY_QUERY_MESH_PRIMS_GEN,
+   RADV_META_OBJECT_KEY_XCLIPSE_MESH_TASKS_CS,
    RADV_META_OBJECT_KEY_BVH_COPY,
    RADV_META_OBJECT_KEY_BVH_COPY_BLAS_ADDRS,
    RADV_META_OBJECT_KEY_BVH_ENCODE,
@@ -458,6 +459,9 @@ radv_get_image_stride_for_96bit(const struct radv_device *device, const struct r
 
    return stride;
 }
+
+void radv_xclipse_convert_mesh_tasks(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint32_t stride,
+                                     uint64_t count_va, uint32_t max_count, bool task, uint64_t dst_va);
 
 void radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
                                        const VkCopyMemoryIndirectInfoKHR *pCopyMemoryIndirectInfo);

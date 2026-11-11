@@ -43,7 +43,7 @@ int ac_drm_device_initialize(int fd, bool is_virtio,
 
    *dev = malloc(sizeof(ac_drm_device));
    if (!(*dev))
-      return -1;
+      return -ENOMEM;
 
 #ifdef HAVE_AMDGPU_VIRTIO
    if (is_virtio) {
@@ -69,10 +69,22 @@ int ac_drm_device_initialize(int fd, bool is_virtio,
       }
    }
 
+   if (r == 0 && !(*dev)->p) {
+#ifdef HAVE_AMDGPU_VIRTIO
+      if (is_virtio)
+         amdvgpu_device_deinitialize((*dev)->vdev);
+      else
+#endif
+         amdgpu_device_deinitialize((*dev)->adev);
+      r = -ENOMEM;
+   }
+
    if (r == 0)
       (*dev)->is_virtio = is_virtio;
-   else
+   else {
       free(*dev);
+      *dev = NULL;
+   }
 
    return r;
 }

@@ -537,7 +537,8 @@ gfx10_init_graphics_preamble_state(const struct ac_preamble_state *state,
    ac_pm4_set_reg(pm4, R_00B01C_SPI_SHADER_PGM_RSRC3_PS,
                   ac_apply_cu_en(S_00B01C_CU_EN(cu_mask_ps) |
                                  S_00B01C_WAVE_LIMIT_GFX7(0x3F) |
-                                 S_00B01C_LDS_GROUP_SIZE_GFX11(info->gfx_level >= GFX11),
+                                 S_00B01C_LDS_GROUP_SIZE_GFX11(info->gfx_level >= GFX11 ||
+                                                               (ac_xclipse_spi11(info) & AC_XCLIPSE_SPI11_PS_LDS_GROUP)),
                                  C_00B01C_CU_EN, 0, info));
    ac_pm4_set_reg(pm4, R_00B0C0_SPI_SHADER_REQ_CTRL_PS,
                   S_00B0C0_SOFT_GROUPING_EN(1) |

@@ -298,6 +298,11 @@ lower_mem_access_cb(nir_intrinsic_op intrin, uint8_t bytes, uint8_t bit_size, ui
                                       intrin != nir_intrinsic_load_push_constant &&
                                       (!cb_data->use_llvm || intrin != nir_intrinsic_load_ubo);
 
+      /* We might increase the bytes with the expectation that res.align is increased too.
+       * When using align_mul/align_offset, we need to use the original byte size.
+       */
+      const unsigned original_bytes = bytes;
+
       /* Round up subdword loads if unsupported. */
       if (bytes <= 2 && combined_align % bytes == 0 && supported_subdword) {
          bit_size = bytes * 8;
@@ -319,12 +324,28 @@ lower_mem_access_cb(nir_intrinsic_op intrin, uint8_t bytes, uint8_t bit_size, ui
       if (!util_is_power_of_two_nonzero(bytes) && (cb_data->gfx_level < GFX12 || bytes != 12)) {
          const uint8_t larger = util_next_power_of_two(bytes);
          const uint8_t smaller = larger / 2;
-         const bool is_aligned = align_mul % smaller == 0;
 
-         /* Overfetch up to 1 dword if this is a bounds-checked buffer load or the access is aligned. */
-         bool overfetch = bytes + 4 >= larger && (is_buffer_load || is_aligned);
-         bytes = overfetch ? larger : smaller;
-         res.align = is_aligned ? smaller : res.align;
+         unsigned overfetch_align = util_next_power_of_two(larger - bytes + 1);
+         const bool can_align_down = align_mul % overfetch_align == 0;
+
+         const unsigned max_overfetch = larger >= 64 ? 16 : (larger >= 32 ? 8 : 4);
+
+         if (larger > bytes + max_overfetch) {
+            /* Avoid overfetching more than one (two for 256bit+ and four for 512bit+) dword. */
+            bytes = smaller;
+         } else if (is_buffer_load) {
+            /* Bounds checking makes this safe. */
+            bytes = larger;
+         } else if (ac_nir_can_increase_load_size(align_mul, align_offset, original_bytes, larger)) {
+            /* Additional trailing bytes stay within an accessible page. */
+            bytes = larger;
+         } else if (can_align_down) {
+            /* Rounding the address down makes this safe. */
+            res.align = overfetch_align;
+            bytes = larger;
+         } else {
+            bytes = smaller;
+         }
       }
       res.num_components = DIV_ROUND_UP(bytes, bit_size / 8);
       res.bit_size = bit_size;

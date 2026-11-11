@@ -600,6 +600,16 @@ align_load_store_size(enum amd_gfx_level gfx_level, unsigned size, bool uses_sme
 }
 
 bool
+ac_nir_can_increase_load_size(uint32_t align_mul, uint32_t align_offset, unsigned old_size,
+                              unsigned new_size)
+{
+   /* The page size should be at least 4096. */
+   uint32_t mul = MIN2(align_mul, 4096);
+   unsigned end = align_offset + old_size;
+   return (new_size - old_size) <= (align(end, mul) - end);
+}
+
+bool
 ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigned bit_size,
                               unsigned num_components, int64_t hole_size, nir_intrinsic_instr *low,
                               nir_intrinsic_instr *high, void *data)
@@ -663,6 +673,13 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
       return false;
    }
 
+   /* There are no 8<->16 packing ALU opcodes, so these vectorizations can create a lot of ALU. */
+   unsigned old_bit_size =
+      is_store ? (low->src[low->intrinsic == nir_intrinsic_store_deref ? 1 : 0].ssa->bit_size)
+               : low->def.bit_size;
+   if (bit_size < 32 && old_bit_size < 32 && bit_size != old_bit_size)
+      return false;
+
    /* Align the size to what the hw supports. */
    unsigned unaligned_new_size = num_components * bit_size;
    unsigned aligned_new_size = nir_round_up_components(num_components) * bit_size;
@@ -694,10 +711,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
           */
          uint32_t resource_align = low->intrinsic == nir_intrinsic_load_global_constant ||
                                    low->intrinsic == nir_intrinsic_load_global ? NIR_ALIGN_MUL_MAX : 4;
-         uint32_t page_size = 4096;
-         uint32_t mul = MIN3(align_mul, page_size, resource_align);
-         unsigned end = (align_offset + unaligned_new_size / 8u);
-         if ((aligned_new_size - unaligned_new_size) / 8u > (align(end, mul) - end))
+         if (!ac_nir_can_increase_load_size(MIN2(align_mul, resource_align), align_offset,
+                                            unaligned_new_size / 8u, aligned_new_size / 8u))
             return false;
       }
 

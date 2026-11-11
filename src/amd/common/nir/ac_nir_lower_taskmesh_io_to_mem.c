@@ -20,6 +20,10 @@ typedef struct {
    bool has_query;
    /* True if the mesh shader is linked with a task shader. */
    bool has_task_shader;
+   /* Xclipse: the firmware has no task/mesh dispatch packets and the kernel has no gang submit.
+    * The task shader runs as a plain compute dispatch and writes one DRAW_INDIRECT command per
+    * workgroup into the draw ring, which a DRAW_INDIRECT_MULTI then consumes. */
+   bool draw_indirect;
 } lower_tsms_io_state;
 
 static nir_def *
@@ -220,6 +224,33 @@ lower_task_launch_mesh_workgroups(nir_builder *b,
        */
       x = nir_bcsel(b, nir_ior(b, nir_ieq_imm(b, y, 0), nir_ieq_imm(b, z, 0)), nir_imm_int(b, 0), x);
 
+      if (s->draw_indirect) {
+         /* {vertexCount, instanceCount, firstVertex, firstInstance}: one vertex per mesh
+          * workgroup, the grid packed into the two words the CP copies to user data. */
+         nir_def *n = nir_imul(b, nir_imul(b, x, y), z);
+         nir_def *xy = nir_ior(b, x, nir_ishl_imm(b, y, 16));
+         task_write_draw_ring(b, nir_vec4(b, n, nir_imm_int(b, 1), xy, z), 0, s);
+
+         /* The first workgroup stores the draw count in the last ring entry. */
+         nir_if *if_first = nir_push_if(b, nir_ieq_imm(b, task_workgroup_index(b, s), 0));
+         {
+            nir_def *g = nir_load_num_workgroups(b);
+            nir_def *total = nir_imul(b, nir_imul(b, nir_channel(b, g, 0), nir_channel(b, g, 1)),
+                                      nir_channel(b, g, 2));
+            nir_def *last = nir_iadd_imm(b, task_num_entries(b, s), -1);
+            total = nir_umin(b, total, last);
+            nir_store_buffer_amd(b, total, nir_load_ring_task_draw_amd(b), nir_imm_int(b, 0),
+                                 nir_imul_imm(b, last, AC_TASK_DRAW_ENTRY_BYTES), nir_imm_int(b, 0),
+                                 .memory_modes = nir_var_shader_out,
+                                 .access = ACCESS_COHERENT | ACCESS_CP_GE_COHERENT_AMD);
+         }
+         nir_pop_if(b, if_first);
+
+         task_invocation_query(b, s);
+         nir_pop_if(b, if_invocation_index_zero);
+         return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+      }
+
       /* Dispatch dimensions of mesh shader workgroups. */
       task_write_draw_ring(b, nir_vec3(b, x, y, z), 0, s);
       /* Prevent the two stores from being reordered. */
@@ -311,7 +342,7 @@ lower_task_intrinsics(nir_builder *b,
 
 bool
 ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
-                                 bool has_query)
+                                 bool has_query, bool draw_indirect)
 {
    bool progress = false;
 
@@ -325,6 +356,7 @@ ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
 
    lower_tsms_io_state state = {
       .has_query = has_query,
+      .draw_indirect = draw_indirect,
    };
 
    progress |= nir_shader_lower_instructions(shader,

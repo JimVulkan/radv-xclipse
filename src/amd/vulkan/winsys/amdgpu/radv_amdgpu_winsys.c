@@ -240,6 +240,8 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
    ac_drm_device *dev;
    struct radv_amdgpu_winsys *ws = NULL;
 
+   *winsys = NULL;
+
    r = ac_drm_device_initialize(fd, is_virtio, &drm_major, &drm_minor, &dev);
    if (r) {
       fprintf(stderr, "radv/amdgpu: failed to initialize device.\n");
@@ -274,8 +276,10 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
          fprintf(stderr, "radv/amdgpu: Failed to create /tmp/radv_bo_history.log.\n");
    }
 
-   if (ac_drm_cs_create_syncobj2(ws->dev, 0, &ws->vm_timeline_syncobj))
+   if (ac_drm_cs_create_syncobj2(ws->dev, 0, &ws->vm_timeline_syncobj)) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
       goto winsys_fail;
+   }
 
    simple_mtx_init(&ws->vm_ioctl_lock, mtx_plain);
 
@@ -307,6 +311,8 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
    return result;
 
 winsys_fail:
+   if (ws->bo_history_logfile)
+      fclose(ws->bo_history_logfile);
    if (ws->alloc_tracker)
       radv_amdgpu_alloc_tracker_release(ws->alloc_tracker);
    free(ws);
@@ -373,6 +379,10 @@ radv_amdgpu_winsys_query_info(int fd, const BITSET_WORD *debug_flags, bool is_vi
    info->base.ip[AMD_IP_COMPUTE].num_queues = MIN2(info->base.ip[AMD_IP_COMPUTE].num_queues, MAX_RINGS_PER_TYPE);
 
    info->syncobj_sync_type = vk_drm_syncobj_get_type(fd);
+   if (!info->syncobj_sync_type.features) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
+      goto fail;
+   }
 
    /* Determine which context priorities are supported. */
    for (uint32_t p = RADEON_CTX_PRIORITY_LOW; p <= RADEON_CTX_PRIORITY_REALTIME; p++) {

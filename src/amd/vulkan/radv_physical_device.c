@@ -153,7 +153,7 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   if (RADV_DEBUG(instance, NO_MESH_SHADER))
+   if (RADV_DEBUG(instance, NO_MESH_SHADER) || !ac_xclipse_mesh_shaders(&pdev->info))
       return false;
 
    return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
@@ -1054,6 +1054,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
       .KHR_maintenance11 = true,
+      .KHR_maintenance12 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = radv_perf_query_supported(pdev),
@@ -1252,6 +1253,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
       .EXT_transform_feedback = true,
+      .EXT_vertex_address_binding_unrestricted = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_vertex_input_dynamic_state = !pdev->use_llvm,
       .EXT_ycbcr_2plane_444_formats = true,
@@ -2013,6 +2015,12 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_AMD_anti_lag */
       .antiLag = true,
+
+      /* VK_KHR_maintenance12 */
+      .maintenance12 = true,
+
+      /* VK_EXT_vertex_address_binding_unrestricted */
+      .vertexAddressBindingUnrestricted = true,
    };
 }
 
@@ -2742,6 +2750,9 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* VK_EXT_shader_split_barrier */
       .splitBarrierReservedSharedMemory = 0,
+
+      /* VK_KHR_maintenance12 */
+      .maxInputAttachmentIndex = ~0,
    };
 
    struct vk_properties *p = &pdev->vk.properties;
@@ -3200,6 +3211,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    /* PKT3_LOAD_SH_REG_INDEX is supported on GFX8+, but it hangs with compute queues until GFX10.3. */
    pdev->load_grid_size_from_user_sgpr = pdev->info.gfx_level >= GFX10_3;
+   pdev->xclipse_taskmesh_emul = pdev->info.xclipse_model != AC_XCLIPSE_NONE;
 
    /* Determine the number of threads per wave for all stages. */
    pdev->cs_wave_size = 64;

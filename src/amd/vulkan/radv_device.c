@@ -1255,6 +1255,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .nggc_max_ps_params = nggc_max_ps_params,
             .no_ngg_gs = pdev->drirc.performance.disable_ngg_gs,
             .load_grid_size_from_user_sgpr = pdev->load_grid_size_from_user_sgpr,
+            .xclipse_taskmesh_emul = pdev->xclipse_taskmesh_emul,
             .emulate_ngg_gs_query_pipeline_stat = pdev->emulate_ngg_gs_query_pipeline_stat,
             .primitives_generated_query = primitives_generated_query,
             .mesh_shader_queries = mesh_shader_queries && pdev->emulate_mesh_shader_queries,
@@ -1430,6 +1431,9 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
       vk_free(&device->vk.alloc, device->private_sdma_queue);
    }
 
+   if (device->xclipse_task_bo)
+      radv_bo_destroy(device, NULL, device->xclipse_task_bo);
+
    _mesa_hash_table_destroy(device->rt_handles, NULL);
 
    radv_device_finish_meta(device);
@@ -1569,6 +1573,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    }
 
    device->vk.sync = device->ws->get_sync_provider(device->ws);
+   if (!device->vk.sync) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail;
+   }
 
    /* Disable unordered submits when SQTT queue events are enabled because queue present events
     * might be missing otherwise.

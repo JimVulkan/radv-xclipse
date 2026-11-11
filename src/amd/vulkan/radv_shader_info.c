@@ -965,7 +965,7 @@ gather_shader_info_task(const struct radv_compiler_info *compiler_info, const ni
    info->cs.linear_taskmesh_dispatch =
       nir->info.mesh.ts_mesh_dispatch_dimensions[1] == 1 && nir->info.mesh.ts_mesh_dispatch_dimensions[2] == 1;
 
-   info->cs.has_query = compiler_info->key.mesh_shader_queries;
+   info->cs.has_query = compiler_info->key.mesh_shader_queries && !compiler_info->key.xclipse_taskmesh_emul;
 }
 
 static uint32_t

@@ -13,11 +13,6 @@
 namespace aco {
 namespace {
 
-constexpr const size_t max_reg_cnt = 512;
-constexpr const size_t max_sgpr_cnt = 128;
-constexpr const size_t min_vgpr = 256;
-constexpr const size_t max_vgpr_cnt = 256;
-
 struct Idx {
    bool operator==(const Idx& other) const { return block == other.block && instr == other.instr; }
    bool operator!=(const Idx& other) const { return !operator==(other); }
@@ -40,78 +35,101 @@ Idx overwritten_untrackable{UINT32_MAX, 3};
 /** Indicates that there isn't a clear single writer, for example due to subdword operations. */
 Idx overwritten_unknown_instr{UINT32_MAX, 4};
 
-struct pr_opt_ctx {
-   using Idx_array = std::array<Idx, max_reg_cnt>;
+struct reg_writer_state {
+   using reg_table = std::array<Idx, 256>;
 
+   reg_table* current;
+   std::vector<std::unique_ptr<reg_table>> pending;
+
+   reg_writer_state(unsigned num_blocks) : pending(num_blocks) {}
+
+   void initialize(Idx value) { current->fill(value); }
+
+   void reset_current(unsigned block_index)
+   {
+      /* CFG roots have no incoming table. */
+      if (!pending[block_index])
+         pending[block_index] = std::make_unique<reg_table>();
+      current = pending[block_index].get();
+   }
+
+   void finish_current(unsigned block_index, const Block::edge_vec& succs)
+   {
+      for (unsigned succ : succs) {
+         /* Loop headers initialize their state without reading backedges. */
+         if (succ <= block_index)
+            continue;
+
+         auto& next = pending[succ];
+         if (next) {
+            /* Successor already has incoming state. Just merge. */
+            assert(succs.size() == 1);
+            for (unsigned reg = 0; reg < current->size(); reg++) {
+               if ((*next)[reg] != (*current)[reg])
+                  (*next)[reg] = overwritten_untrackable;
+            }
+            pending[block_index].reset();
+         } else {
+            /* Transfer ownership to first or create copies for other successors. */
+            next = succ == succs.front() ? std::move(pending[block_index])
+                                         : std::make_unique<reg_table>(*current);
+         }
+      }
+      current = nullptr;
+   }
+};
+
+struct pr_opt_ctx {
    Program* program;
    Block* current_block;
    uint32_t current_instr_idx;
    std::vector<uint16_t> uses;
-   std::unique_ptr<Idx_array[]> instr_idx_by_regs;
+   reg_writer_state linear_writes;
+   reg_writer_state logical_writes;
 
    pr_opt_ctx(Program* p)
        : program(p), current_block(nullptr), current_instr_idx(0), uses(dead_code_analysis(p)),
-         instr_idx_by_regs(std::unique_ptr<Idx_array[]>{new Idx_array[p->blocks.size()]})
+         linear_writes(p->blocks.size()), logical_writes(p->blocks.size())
    {}
 
-   ALWAYS_INLINE void reset_block_regs(const Block::edge_vec& preds, const unsigned block_index,
-                                       const unsigned min_reg, const unsigned num_regs)
+   Idx* reg_writers(unsigned reg)
    {
-      const unsigned num_preds = preds.size();
-      const unsigned first_pred = preds[0];
-
-      /* Copy information from the first predecessor. */
-      memcpy(&instr_idx_by_regs[block_index][min_reg], &instr_idx_by_regs[first_pred][min_reg],
-             num_regs * sizeof(Idx));
-
-      /* Mark overwritten if it doesn't match with other predecessors. */
-      const unsigned until_reg = min_reg + num_regs;
-      for (unsigned i = 1; i < num_preds; ++i) {
-         unsigned pred = preds[i];
-         for (unsigned reg = min_reg; reg < until_reg; ++reg) {
-            Idx& idx = instr_idx_by_regs[block_index][reg];
-            if (idx == overwritten_untrackable)
-               continue;
-
-            if (idx != instr_idx_by_regs[pred][reg])
-               idx = overwritten_untrackable;
-         }
-      }
+      return reg < 256 ? linear_writes.current->data() + reg
+                       : logical_writes.current->data() + reg - 256;
    }
 
-   void reset_block(Block* block)
+   Idx& reg_writer(unsigned reg) { return *reg_writers(reg); }
+
+   void init_block(Block* block)
    {
       current_block = block;
       current_instr_idx = 0;
 
+      linear_writes.reset_current(block->index);
+      if (block->linear_preds.empty() || !block->logical_preds.empty())
+         logical_writes.reset_current(block->index);
+
       if (block->linear_preds.empty()) {
-         std::fill(instr_idx_by_regs[block->index].begin(), instr_idx_by_regs[block->index].end(),
-                   not_written_yet);
+         linear_writes.initialize(not_written_yet);
+         logical_writes.initialize(not_written_yet);
       } else if (block->kind & block_kind_loop_header) {
          /* Instructions inside the loop may overwrite registers of temporaries that are
           * not live inside the loop, but we can't detect that because we haven't processed
           * the blocks in the loop yet. As a workaround, mark all registers as untrackable.
           * TODO: Consider improving this in the future.
           */
-         std::fill(instr_idx_by_regs[block->index].begin(), instr_idx_by_regs[block->index].end(),
-                   overwritten_untrackable);
-      } else {
-         reset_block_regs(block->linear_preds, block->index, 0, max_sgpr_cnt);
-         reset_block_regs(block->linear_preds, block->index, 251, 3);
-
-         if (!block->logical_preds.empty()) {
-            /* We assume that VGPRs are only read by blocks which have a logical predecessor,
-             * ie. any block that reads any VGPR has at least 1 logical predecessor.
-             */
-            reset_block_regs(block->logical_preds, block->index, min_vgpr, max_vgpr_cnt);
-         } else {
-            /* If a block has no logical predecessors, it is not part of the
-             * logical CFG and therefore it also won't have any logical successors.
-             * Such a block does not write any VGPRs ever.
-             */
-            assert(block->logical_succs.empty());
-         }
+         linear_writes.initialize(overwritten_untrackable);
+         logical_writes.initialize(overwritten_untrackable);
+      } else if (block->logical_preds.empty()) {
+         /* Blocks outside the logical CFG cannot access VGPRs. */
+         assert(block->logical_succs.empty());
       }
+   }
+
+   void finish_block(Block* block)
+   {
+      linear_writes.finish_current(block->index, block->linear_succs);
+      logical_writes.finish_current(block->index, block->logical_succs);
    }
 
    Instruction* get(Idx idx) { return program->blocks[idx.block].instructions[idx.instr].get(); }
@@ -131,18 +149,16 @@ save_reg_writes(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       if (def.regClass().is_subdword())
          idx = overwritten_unknown_instr;
 
-      assert((r + dw_size) <= max_reg_cnt);
       assert(def.size() == dw_size || def.regClass().is_subdword());
-      std::fill(ctx.instr_idx_by_regs[ctx.current_block->index].begin() + r,
-                ctx.instr_idx_by_regs[ctx.current_block->index].begin() + r + dw_size, idx);
+      std::fill_n(ctx.reg_writers(r), dw_size, idx);
    }
    if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
-      ctx.instr_idx_by_regs[ctx.current_block->index][instr->pseudo().scratch_sgpr] =
-         overwritten_unknown_instr;
+      ctx.reg_writer(instr->pseudo().scratch_sgpr) = overwritten_unknown_instr;
    }
    if (instr->isCall()) {
-      std::fill(ctx.instr_idx_by_regs[ctx.current_block->index].begin(),
-                ctx.instr_idx_by_regs[ctx.current_block->index].end(), overwritten_unknown_instr);
+      ctx.linear_writes.initialize(overwritten_unknown_instr);
+      if (ctx.current_block->linear_preds.empty() || !ctx.current_block->logical_preds.empty())
+         ctx.logical_writes.initialize(overwritten_unknown_instr);
    }
 }
 
@@ -150,14 +166,11 @@ Idx
 last_writer_idx(pr_opt_ctx& ctx, PhysReg physReg, RegClass rc)
 {
    /* Verify that all of the operand's registers are written by the same instruction. */
-   assert(physReg.reg() < max_reg_cnt);
-   Idx instr_idx = ctx.instr_idx_by_regs[ctx.current_block->index][physReg.reg()];
+   Idx* reg_writes = ctx.reg_writers(physReg.reg());
+   Idx instr_idx = reg_writes[0];
    unsigned dw_size = DIV_ROUND_UP(rc.bytes(), 4u);
-   unsigned r = physReg.reg();
    bool all_same =
-      std::all_of(ctx.instr_idx_by_regs[ctx.current_block->index].begin() + r,
-                  ctx.instr_idx_by_regs[ctx.current_block->index].begin() + r + dw_size,
-                  [instr_idx](Idx i) { return i == instr_idx; });
+      std::all_of(reg_writes, reg_writes + dw_size, [instr_idx](Idx i) { return i == instr_idx; });
 
    return all_same ? instr_idx : overwritten_untrackable;
 }
@@ -194,7 +207,7 @@ is_overwritten_since(pr_opt_ctx& ctx, PhysReg reg, RegClass rc, const Idx& since
    unsigned current_block_idx = ctx.current_block->index;
 
    for (unsigned r = begin_reg; r < end_reg; ++r) {
-      Idx& i = ctx.instr_idx_by_regs[current_block_idx][r];
+      Idx& i = ctx.reg_writer(r);
       if (i == overwritten_untrackable && current_block_idx > since_idx.block)
          return true;
       else if (i == overwritten_untrackable || i == not_written_yet)
@@ -725,6 +738,23 @@ num_encoded_alu_operands(const aco_ptr<Instruction>& instr)
    return 0;
 }
 
+bool
+instr_overwrites(Instruction* instr, PhysReg reg, unsigned size)
+{
+   for (Definition def : instr->definitions) {
+      if (def.physReg() + def.size() > reg && reg + size > def.physReg())
+         return true;
+   }
+   if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
+      PhysReg scratch_reg = instr->pseudo().scratch_sgpr;
+      if (scratch_reg >= reg && reg + size > scratch_reg)
+         return true;
+   }
+   if (instr->isCall())
+      return true;
+   return false;
+}
+
 void
 try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
@@ -807,10 +837,18 @@ try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
             continue;
          }
 
-         /* Don't propagate misaligned SGPRs.
-          * Note: No ALU instruction can take a variable larger than 64bit.
-          */
+         /* Don't propagate misaligned SGPRs. */
          if (op.regClass() == s2 && reg.reg() % 2 != 0)
+            break;
+         if (op.regClass().type() == RegType::sgpr && op.size() >= 3 && reg.reg() % 4 != 0)
+            break;
+
+         /* WMMA accumulators aren't late kill, but they can't partially overlap. */
+         bool late_kill =
+            op.isLateKill() || (instr_info.classes[(int)instr->opcode] == instr_class::wmma &&
+                                i == 2 && instr->definitions[0].physReg() != reg);
+
+         if (late_kill && instr_overwrites(instr.get(), reg, op.size()))
             break;
 
          /* Sub dword operands might need updates to SDWA/opsel,
@@ -826,30 +864,13 @@ try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 
          /* Use the p_split_vector operand register directly.
           *
-          * Note: this might violate register assignment rules to some extend
+          * Note: this might violate register assignment rules to some extent
           *       in case the definition does not get recolored, eventually.
           */
          instr->operands[i].setFixed(reg);
          break;
       }
    }
-}
-
-bool
-instr_overwrites(Instruction* instr, PhysReg reg, unsigned size)
-{
-   for (Definition def : instr->definitions) {
-      if (def.physReg() + def.size() > reg && reg + size > def.physReg())
-         return true;
-   }
-   if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
-      PhysReg scratch_reg = instr->pseudo().scratch_sgpr;
-      if (scratch_reg >= reg && reg + size > scratch_reg)
-         return true;
-   }
-   if (instr->isCall())
-      return true;
-   return false;
 }
 
 bool
@@ -1160,8 +1181,7 @@ try_optimize_branching_sequence(pr_opt_ctx& ctx, aco_ptr<Instruction>& exec_copy
       exec_val->definitions[0] = Definition(exec, ctx.program->lane_mask);
    }
    for (unsigned i = 0; i < ctx.program->lane_mask.size(); i++)
-      ctx.instr_idx_by_regs[ctx.current_block->index][exec + i] =
-         ctx.instr_idx_by_regs[ctx.current_block->index][exec_copy_op.physReg() + i];
+      ctx.reg_writer(exec + i) = ctx.reg_writer(exec_copy_op.physReg() + i);
 
    /* If there are other instructions (besides p_logical_end) between
     * writing the value and copying it to exec, reassign uses
@@ -1283,7 +1303,7 @@ optimize_postRA(Program* program)
     * instructions or adjust the use counts of temps.
     */
    for (auto& block : program->blocks) {
-      ctx.reset_block(&block);
+      ctx.init_block(&block);
 
       while (ctx.current_instr_idx < block.instructions.size()) {
          aco_ptr<Instruction>& instr = block.instructions[ctx.current_instr_idx];
@@ -1291,6 +1311,7 @@ optimize_postRA(Program* program)
       }
 
       try_skip_const_branch(ctx, block.instructions.back());
+      ctx.finish_block(&block);
    }
 
    /* Cleanup pass

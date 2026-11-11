@@ -62,6 +62,11 @@ extern uint32_t ac_titan_regmap_level;
  * Default on at level >= 2. */
 extern bool ac_titan_regmap_suppress;
 
+/* Write SPI_SHADER_PGM_RSRC3_GS and RSRC4_GS (ac_xclipse_spi11 bit 0 with the kernel's SH map,
+ * which sends them to TITAN's 0x08a and 0x08b). Off, RADV never programs them: the per-pipeline
+ * writes stay suppressed. */
+extern bool ac_titan_sh_cu_masks;
+
 /* Slot of TITAN's 9-dword per-MRT block for the colour target address high half, or -1 for
  * GFX10_3's CB_COLOR0_BASE_EXT. Unmeasured (the vendor's surfaces are below 40 bits);
  * RADV_XCLIPSE_TITAN_CBEXT sweeps it. */
@@ -380,6 +385,9 @@ ac_titan_sh_suppressed(uint32_t reg)
    const uint32_t dw = (reg - SI_SH_REG_OFFSET) >> 2;
 
    if (!ac_titan_regmap_active || ac_titan_regmap_level < 2 || !ac_titan_regmap_suppress)
+      return false;
+   /* With the kernel's SH map both land on TITAN's own RSRC3_GS and RSRC4_GS. */
+   if (ac_titan_sh_cu_masks)
       return false;
    return dw == 0x087 || dw == 0x081;
 }

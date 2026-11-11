@@ -14,7 +14,7 @@
 
 static enum ac_barrier_flags
 ac_get_reduced_barrier_flags(enum amd_gfx_level gfx_level, enum amd_ip_type ip_type,
-                             enum ac_barrier_flags flags)
+                             enum ac_barrier_flags flags, bool keep_cs_sync)
 {
    /* Only process compute flags on compute queues. */
    if (ip_type == AMD_IP_COMPUTE)
@@ -24,9 +24,9 @@ ac_get_reduced_barrier_flags(enum amd_gfx_level gfx_level, enum amd_ip_type ip_t
       gfx_level >= GFX9 && flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
                                     AC_BARRIER_SYNC_BOTTOM_OF_PIPE);
 
-   /* TS events wait for everything. */
+   /* TS events wait for everything. Xclipse (legacy sync) keeps the CS_PARTIAL_FLUSH. */
    if (uses_ts_event)
-      flags &= ~AC_BARRIER_SYNC_VS & ~AC_BARRIER_SYNC_PS & ~AC_BARRIER_SYNC_CS;
+      flags &= ~AC_BARRIER_SYNC_VS & ~AC_BARRIER_SYNC_PS & (keep_cs_sync ? ~0 : ~AC_BARRIER_SYNC_CS);
 
    return flags;
 }
@@ -65,8 +65,9 @@ ac_gfx10_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
                       const struct ac_barrier_state *state,
                       bool *context_roll, enum ac_rgp_flush_bits *rgp_flush_bits)
 {
+   const bool legacy = state->xclipse_legacy_sync;
    enum ac_barrier_flags flags =
-      ac_get_reduced_barrier_flags(gfx_level, ip_type, state->flags);
+      ac_get_reduced_barrier_flags(gfx_level, ip_type, state->flags, legacy);
    uint32_t gcr_cntl = 0;
 
    if (!flags)
@@ -148,13 +149,25 @@ ac_gfx10_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
 
       ac_cmdbuf_begin(cs);
 
-      /* We must flush CMASK/FMASK/DCC separately if the main event only flushes CB_DATA. */
-      if (gfx_level < GFX12 && eop_event == V_028A90_FLUSH_AND_INV_CB_DATA_TS)
-         ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_CB_META);
+      if (legacy) {
+         /* Mesa 26.3 order: CB_META, DB_META, CS_PARTIAL_FLUSH, then the TS event. */
+         if (gfx_level < GFX12 && flags & AC_BARRIER_SYNC_AND_INV_CB)
+            ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_CB_META);
+         if (gfx_level < GFX11 && flags & AC_BARRIER_SYNC_AND_INV_DB)
+            ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_DB_META);
+         if (flags & AC_BARRIER_SYNC_CS) {
+            ac_cmdbuf_event_write(V_028A90_CS_PARTIAL_FLUSH);
+            *rgp_flush_bits |= AC_RGP_FLUSH_CS_PARTIAL_FLUSH;
+         }
+      } else {
+         /* We must flush CMASK/FMASK/DCC separately if the main event only flushes CB_DATA. */
+         if (gfx_level < GFX12 && eop_event == V_028A90_FLUSH_AND_INV_CB_DATA_TS)
+            ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_CB_META);
 
-      /* We must flush HTILE separately if the main event only flushes DB_DATA. */
-      if (gfx_level < GFX12 && eop_event == V_028A90_FLUSH_AND_INV_DB_DATA_TS)
-         ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_DB_META);
+         /* We must flush HTILE separately if the main event only flushes DB_DATA. */
+         if (gfx_level < GFX12 && eop_event == V_028A90_FLUSH_AND_INV_DB_DATA_TS)
+            ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_DB_META);
+      }
 
       ac_cmdbuf_end();
 
@@ -313,7 +326,7 @@ ac_gfx6_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
                      bool *context_roll, enum ac_rgp_flush_bits *rgp_flush_bits)
 {
    enum ac_barrier_flags flags =
-      ac_get_reduced_barrier_flags(gfx_level, ip_type, state->flags);
+      ac_get_reduced_barrier_flags(gfx_level, ip_type, state->flags, false);
    const uint32_t eop_flush_flags = flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
                                              AC_BARRIER_SYNC_BOTTOM_OF_PIPE);
    const bool is_mec = ip_type == AMD_IP_COMPUTE && gfx_level >= GFX7;

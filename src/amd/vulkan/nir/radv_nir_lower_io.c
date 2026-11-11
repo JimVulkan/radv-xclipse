@@ -133,7 +133,7 @@ radv_nir_lower_io_to_mem(const struct radv_compiler_info *compiler_info, struct 
       NIR_PASS(_, nir, ac_nir_lower_gs_inputs_to_mem, map_input, compiler_info->ac->gfx_level, false);
       return true;
    } else if (nir->info.stage == MESA_SHADER_TASK) {
-      ac_nir_lower_task_outputs_to_mem(nir, info->cs.has_query);
+      ac_nir_lower_task_outputs_to_mem(nir, info->cs.has_query, compiler_info->key.xclipse_taskmesh_emul);
       return true;
    } else if (nir->info.stage == MESA_SHADER_MESH) {
       ac_nir_lower_mesh_inputs_to_mem(nir, stage->info.ms.has_task);

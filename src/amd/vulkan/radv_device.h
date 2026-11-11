@@ -167,6 +167,9 @@ struct radv_device {
    uint32_t dispatch_initiator;
    uint32_t dispatch_initiator_task;
 
+   /* Xclipse task/mesh emulation rings (radv_xclipse_task_bo). */
+   struct radeon_winsys_bo *xclipse_task_bo;
+
    /* MSAA sample locations.
     * The first index is the sample index.
     * The second index is the coordinate: X, Y. */

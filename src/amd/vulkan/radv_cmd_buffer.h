@@ -459,6 +459,9 @@ struct radv_cmd_stream {
 
    enum amd_ip_type hw_ip;
 
+   /* Xclipse: emit barriers the Mesa 26.3 way (ac_barrier_state::xclipse_legacy_sync). */
+   bool xclipse_legacy_sync;
+
    struct ac_buffered_sh_regs buffered_sh_regs;
 };
 

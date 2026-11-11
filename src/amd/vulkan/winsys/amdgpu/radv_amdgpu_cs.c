@@ -476,28 +476,26 @@ radv_amdgpu_cs_grow(struct ac_cmdbuf *_cs, size_t min_size)
 
    const uint32_t ib_alignment = cs->ws->info.ip[cs->hw_ip].ib_alignment;
 
-   cs->ws->base.cs_finalize(_cs);
+   VkResult result = cs->ws->base.cs_finalize(_cs);
+   if (result != VK_SUCCESS) {
+      cs->base.cdw = 0;
+      return;
+   }
 
    uint64_t ib_size = MAX2(min_size * 4 + 16, cs->base.max_dw * 4 * 2);
 
    ib_size = align(MIN2(ib_size, ~C_3F3_IB_SIZE), ib_alignment);
 
-   VkResult result = radv_amdgpu_cs_bo_create(cs, ib_size);
+   result = radv_amdgpu_cs_bo_create(cs, ib_size);
+   if (result != VK_SUCCESS)
+      goto restore_ib;
 
-   if (result != VK_SUCCESS) {
-      cs->base.cdw = 0;
-      cs->status = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      radv_amdgpu_restore_last_ib(cs);
-   }
-
-   cs->ib_mapped = radv_buffer_map(&cs->ws->base, cs->ib_buffer);
-   if (!cs->ib_mapped) {
+   uint8_t *ib_mapped = radv_buffer_map(&cs->ws->base, cs->ib_buffer);
+   if (!ib_mapped) {
       cs->ws->base.buffer_destroy(&cs->ws->base, cs->ib_buffer);
-      cs->base.cdw = 0;
-
       /* VK_ERROR_MEMORY_MAP_FAILED is not valid for vkEndCommandBuffer. */
-      cs->status = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      radv_amdgpu_restore_last_ib(cs);
+      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      goto restore_ib;
    }
 
    cs->ws->base.cs_add_buffer(&cs->base, cs->ib_buffer);
@@ -511,11 +509,23 @@ radv_amdgpu_cs_grow(struct ac_cmdbuf *_cs, size_t min_size)
       cs->ib_size_ptr = cs->base.buf + cs->base.cdw - 1;
    }
 
-   cs->base.buf = (uint32_t *)cs->ib_mapped;
+   cs->ib_mapped = ib_mapped;
+   cs->base.buf = (uint32_t *)ib_mapped;
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->base.max_dw = ib_size / 4 - 4;
    cs->last_cp_dma_header = NULL;
+   return;
+
+restore_ib:
+   /* Finalization transferred the previous BO to ib_buffers. Keep its mapping and
+    * capacity valid for discarded recording after an error; never patch a chain
+    * link with cdw == 0 or publish a failed mapping as the recording buffer.
+    */
+   radv_amdgpu_restore_last_ib(cs);
+   cs->status = result;
+   cs->base.cdw = 0;
+   cs->base.reserved_dw = 0;
 }
 
 static void
@@ -567,6 +577,9 @@ radv_amdgpu_cs_finalize(struct ac_cmdbuf *_cs)
 {
    struct radv_amdgpu_cs *cs = radv_amdgpu_cs(_cs);
 
+   if (cs->status != VK_SUCCESS)
+      return cs->status;
+
    assert(cs->base.cdw <= cs->base.reserved_dw);
 
    if (cs->chain_ib) {
@@ -585,6 +598,10 @@ radv_amdgpu_cs_finalize(struct ac_cmdbuf *_cs)
    /* Append the current (last) IB to the array of IB buffers. */
    radv_amdgpu_cs_add_ib_buffer(cs, cs->ib_buffer, cs->ib_buffer->va,
                                 cs->chain_ib ? G_3F3_IB_SIZE(*cs->ib_size_ptr) : cs->base.cdw);
+
+   /* On allocation failure the array did not take ownership of this BO. */
+   if (cs->status != VK_SUCCESS)
+      return cs->status;
 
    /* Prevent freeing this BO twice. */
    cs->ib_buffer = NULL;
@@ -784,6 +801,9 @@ radv_amdgpu_cs_emit_secondary_ib2(struct radv_amdgpu_cs *parent, struct radv_amd
       if (parent->base.cdw + 4 > parent->base.max_dw)
          radv_amdgpu_cs_grow(&parent->base, 4);
 
+      if (parent->status != VK_SUCCESS)
+         return;
+
       parent->base.reserved_dw = MAX2(parent->base.reserved_dw, parent->base.cdw + 4);
 
       const uint64_t va = child->ib_buffers[i].va;
@@ -828,6 +848,9 @@ radv_amdgpu_cs_execute_secondary(struct ac_cmdbuf *_parent, struct ac_cmdbuf *_c
 
          if (parent->base.cdw + cdw > parent->base.max_dw)
             radv_amdgpu_cs_grow(&parent->base, cdw);
+
+         if (parent->status != VK_SUCCESS)
+            return;
 
          parent->base.reserved_dw = MAX2(parent->base.reserved_dw, parent->base.cdw + cdw);
 
@@ -900,7 +923,8 @@ radv_amdgpu_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       }
 
       /* Finalize the current CS. */
-      cs->ws->base.cs_finalize(_cs);
+      if (cs->ws->base.cs_finalize(_cs) != VK_SUCCESS)
+         return;
 
       /* Chain the current CS to the DGC CS. */
       _cs->buf[_cs->cdw - 4] = PKT3(PKT3_INDIRECT_BUFFER, 2, 0);
@@ -1306,8 +1330,12 @@ radv_amdgpu_cs_submit_zero(struct radv_amdgpu_ctx *ctx, enum amd_ip_type ip_type
             return VK_ERROR_DEVICE_LOST;
          }
 
-         sync_accumulate("radv", &fd, fd2);
+         ret = sync_accumulate("radv", &fd, fd2);
          close(fd2);
+         if (ret < 0) {
+            close(fd);
+            return VK_ERROR_DEVICE_LOST;
+         }
       }
       for (unsigned i = 0; i < sem_info->wait.timeline_syncobj_count; ++i) {
          int fd2;
@@ -1328,8 +1356,12 @@ radv_amdgpu_cs_submit_zero(struct radv_amdgpu_ctx *ctx, enum amd_ip_type ip_type
             return VK_ERROR_DEVICE_LOST;
          }
 
-         sync_accumulate("radv", &fd, fd2);
+         ret = sync_accumulate("radv", &fd, fd2);
          close(fd2);
+         if (ret < 0) {
+            close(fd);
+            return VK_ERROR_DEVICE_LOST;
+         }
       }
       ret = ac_drm_cs_syncobj_import_sync_file(ctx->ws->dev, queue_syncobj, fd);
       close(fd);

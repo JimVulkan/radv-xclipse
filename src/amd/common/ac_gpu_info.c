@@ -25,6 +25,7 @@
 bool ac_titan_regmap_active = false;
 uint32_t ac_titan_regmap_level = 0;
 bool ac_titan_regmap_suppress = true;
+bool ac_titan_sh_cu_masks = false;
 int ac_titan_cb_ext_slot = -1;
 int ac_titan_cb_view_slot = -1;
 uint32_t ac_titan_regmap_hits = 0;
@@ -210,16 +211,17 @@ ac_titan_regmap_set_level(uint32_t level)
  * 1024-line parameter cache (341, where pc_lines 256 gives 85) and PA_SC_BINNER_CNTL_2, which
  * upstream never writes on GFX10.3 (bit 22 SBB_ENABLE, 23 ENABLE_PING_PONG_BIN_ORDER, 24-25 the
  * flip, 21 DISABLE_NOPCEXPORT_BREAKBATCH_CONDITION; field names from Samsung's gc_10_4_0 sh_mask
- * headers). The 920 values measured +2.5% on loadstorm (old tree, knob only). The 530 values are
+ * headers). The 920 values are on: probe/gfx/perfax measures image copies +47%, blits +95%, buffer
+ * to image uploads +49%, alpha-tested fill +12% and nothing slower. The 530 values are
  * its own: 4/32 states and 1792 prims per batch, PAL's MGfx defaults. Its bins are computed: the
  * 530 has one RB and one TCC, so the upstream formula gives 64x64 for RGBA8 + depth (the vendor's
- * value) and 32x32 for two RGBA16F targets. Off by default: in Fenyx on the A55 it measured neutral
+ * value) and 32x32 for two RGBA16F targets. The 530 row is off: in Fenyx on the A55 it measured neutral
  * (54.9 against 55.4 ms of GPU per frame, same session and spot). */
 static const struct ac_xclipse_chip ac_xclipse_chips[AC_XCLIPSE_MODEL_COUNT] = {
    /*                       name       codename         titan  rt     ctxinit nopf   pacing unstable */
    [AC_XCLIPSE_NONE]    = {"none",    NULL,            false, true,  false,  false, false, false},
    [AC_XCLIPSE_920]     = {"920",     "VANGOGHLITE",   false, true,  false,  false, true,  false,
-                           {64, 3, 8, 0x03ff0154, 0x00c00000, false}},
+                           {64, 3, 8, 0x03ff0154, 0x00c00000, true}},
    [AC_XCLIPSE_530]     = {"530",     "TITAN",         true,  false, true,   false, false, false,
                            {0, 4, 32, 0x06ff0154, 0x03e00000, false}},
    [AC_XCLIPSE_940]     = {"940",     "MAGELLAN CARL", true,  true,  true,   true,  false, false},
@@ -264,7 +266,8 @@ ac_xclipse_pbb(const struct radeon_info *info)
  * together, as the vendor does on every Xclipse) instead of FLUSH_AND_INV_DB_DATA_TS plus
  * FLUSH_AND_INV_DB_META, which the vendor never sends. Samsung's kernel (VOYAGERSW-1566, MGFX1-3):
  * "DB has a limitation to handle concurrent z flush & request ... the problem disappears with
- * removal of DB flush cache". On by default on every Xclipse; 0 = upstream. */
+ * removal of DB flush cache". Default: on for the 530 (MGFX1), whose rendering broke in games when
+ * t8 turned it off (2026-11-10), off elsewhere since 2026-11-09. 0 = off, 1 = on, on any Xclipse. */
 bool
 ac_xclipse_full_db_flush(const struct radeon_info *info)
 {
@@ -273,7 +276,76 @@ ac_xclipse_full_db_flush(const struct radeon_info *info)
       const char *src;
       knob = xclipse_knob_int("RADV_XCLIPSE_DBFLUSH", "debug.radv_xclipse_dbflush", &src);
    }
+   if (info->xclipse_model == AC_XCLIPSE_NONE || knob == 0)
+      return false;
+   return knob > 0 || info->xclipse_model == AC_XCLIPSE_530;
+}
+
+/* RADV_XCLIPSE_MESH / debug.radv_xclipse_mesh: VK_EXT_mesh_shader, on by default; 0 hides it on
+ * any Xclipse. Measured on the 920 with probe/gfx/mshp (radv-xclipse issue 23 reports the same on
+ * the 940): direct mesh draws render; DISPATCH_MESH_INDIRECT_MULTI hangs the GPU with a draw count
+ * of 1, as does the indirect count form with a count of 1 or 0; every draw with a task shader has
+ * its submission refused by the kernel (EINVAL, no gang submit in sgpu, DRM 3.40). The vendor
+ * driver exposes no mesh shaders on any Xclipse. */
+bool
+ac_xclipse_mesh_shaders(const struct radeon_info *info)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_int("RADV_XCLIPSE_MESH", "debug.radv_xclipse_mesh", &src);
+   }
+   if (info->xclipse_model == AC_XCLIPSE_NONE)
+      return true;
+   return knob != 0;
+}
+
+/* RADV_XCLIPSE_SYNC263 / debug.radv_xclipse_sync263: emit barriers the Mesa 26.3 way on Xclipse
+ * (ac_barrier_state::xclipse_legacy_sync). On by default on every Xclipse; 0 = upstream 27.0. */
+bool
+ac_xclipse_legacy_sync(const struct radeon_info *info)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_int("RADV_XCLIPSE_SYNC263", "debug.radv_xclipse_sync263", &src);
+   }
    return info->xclipse_model != AC_XCLIPSE_NONE && knob != 0;
+}
+
+/* RADV_XCLIPSE_SPI11 / debug.radv_xclipse_spi11: program the SPI wave launch registers as the
+ * vendor does. A bit mask, default 3, 0 = the values used before.
+ *
+ * Bit 0 (AC_XCLIPSE_SPI11_GS_RSRC4), chips with the 530's register map: program
+ * SPI_SHADER_PGM_RSRC3_GS and RSRC4_GS at all. Before, their per-pipeline writes were suppressed
+ * (at GFX10.3's offsets they hit the shader address) and stayed suppressed once the kernel's SH map
+ * could place them (0x08a, 0x08b). RADV never wrote either one: both kept whatever the last vendor
+ * context left there, or their reset value of 0 after the GPU lost power.
+ * From MGFX1 on, SPI_SHADER_PGM_RSRC4_GS has the GFX11 layout. CU_EN is bit 0 alone, and bits 14 and 15 are
+ * PH_THROTTLE_EN and SPI_THROTTLE_EN (Samsung's gc_10_4_0_sh_mask_m1.h and _m2.h; the 920's header
+ * still has CU_EN in bits 0-15). The GFX10.3 value CU_EN(0xffff) therefore turned both GS wave
+ * throttles on for every NGG pipeline. The vendor writes 0 in those 16 bits on the 530
+ * (0x82000000, 0x84800000 against 0x0200ffff, 0x0280ffff on the 920) and its Rsrc4GsThrottleEn
+ * setting defaults to 0.
+ *
+ * Bit 1 (AC_XCLIPSE_SPI11_PS_LDS_GROUP), every Xclipse: SPI_SHADER_PGM_RSRC3_PS.LDS_GROUP_SIZE = 1.
+ * The vendor writes 0x0040ffff on the 920 and on the 530, and upstream does the same on GFX11,
+ * whose pixel shaders these chips run. */
+unsigned
+ac_xclipse_spi11(const struct radeon_info *info)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_int("RADV_XCLIPSE_SPI11", "debug.radv_xclipse_spi11", &src);
+   }
+   if (info->xclipse_model == AC_XCLIPSE_NONE)
+      return 0;
+
+   unsigned mask = knob < 0 ? 3 : (unsigned)knob;
+   if (!ac_xclipse_chip_info(info)->titan_regmap)
+      mask &= ~AC_XCLIPSE_SPI11_GS_RSRC4;
+   return mask;
 }
 
 /* Like xclipse_knob_int but accepts 0x-prefixed hex, for register-shaped values. -1 = unset. */
@@ -302,6 +374,34 @@ xclipse_knob_hex(const char *env_name, const char *prop_name, const char **src_o
    }
    *src_out = "default";
    return -1;
+}
+
+/* RADV_XCLIPSE_GS_CU / debug.radv_xclipse_gs_cu: CU_EN for SPI_SHADER_PGM_RSRC3_GS (hex), used with
+ * ac_xclipse_spi11 bit 0 to measure whether the chip honours the mask. -1 = unset. */
+/* RADV_XCLIPSE_TFQ / debug.radv_xclipse_tfq: the vendor's texture filter optimisations, on by
+ * default on every Xclipse. 0 = exact trilinear and anisotropic filtering on every texture. Returns
+ * the sampler bits: PERF_MIP in [3:0], 0x10 = the AMD anisotropic threshold and bias. Values above 1
+ * are taken as those bits, for measurements. */
+unsigned
+ac_xclipse_texture_filter_opt(void)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_int("RADV_XCLIPSE_TFQ", "debug.radv_xclipse_tfq", &src);
+   }
+   return knob < 0 || knob == 1 ? 0x1f : (unsigned)knob & 0x1f;
+}
+
+int
+ac_xclipse_gs_cu_en(void)
+{
+   static int knob = -2;
+   if (knob == -2) {
+      const char *src;
+      knob = xclipse_knob_hex("RADV_XCLIPSE_GS_CU", "debug.radv_xclipse_gs_cu", &src);
+   }
+   return knob;
 }
 
 /* Env var (only if non-empty and numeric), else Android property. -1 = not set anywhere.
@@ -1324,6 +1424,8 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
          ac_titan_regmap_suppress = swant != 0;   /* -1 = unset = on */
          info->family = CHIP_TITAN;
          ac_titan_regmap_set_level(twant);
+         ac_titan_sh_cu_masks =
+            ac_titan_kmap_level() >= 2 && (ac_xclipse_spi11(info) & AC_XCLIPSE_SPI11_GS_RSRC4);
          RADV_LOGI("[XCLIPSE] TITAN suppress=%d (from %s)", ac_titan_regmap_suppress, ssrc);
          {
             const char *csrc = "default";

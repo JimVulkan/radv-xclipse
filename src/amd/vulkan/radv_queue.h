@@ -19,6 +19,8 @@ struct radv_physical_device;
 struct radv_cmd_stream;
 struct radv_device;
 
+struct radeon_winsys_bo *radv_xclipse_task_bo(struct radv_device *device);
+
 struct radv_queue_ring_info {
    uint32_t scratch_size_per_wave;
    uint32_t scratch_waves;

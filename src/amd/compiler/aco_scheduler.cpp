@@ -82,7 +82,6 @@ struct UpwardsCursor {
 };
 
 struct MoveState {
-   monotonic_buffer_resource m;
    RegisterDemand max_registers;
 
    Block* block;
@@ -90,8 +89,27 @@ struct MoveState {
    bool improved_rar;
 
    std::vector<bool> depends_on;
-   aco::unordered_map<uint32_t, int> rar_dependencies; /* temp-id -> index relative to insert_idx */
-   MoveState() : rar_dependencies(m) {}
+   /* temp-id -> index relative to insert_idx, or INT16_MIN if absent */
+   std::vector<int16_t> rar_dependencies;
+   std::vector<uint32_t> rar_dependency_ids;
+
+   void clear_rar_dependencies()
+   {
+      /* Only reset entries touched by the previous scan. */
+      for (uint32_t id : rar_dependency_ids)
+         rar_dependencies[id] = INT16_MIN;
+      rar_dependency_ids.clear();
+   }
+
+   bool has_rar_dependency(uint32_t id) const { return rar_dependencies[id] != INT16_MIN; }
+
+   void set_rar_dependency(uint32_t id, int index)
+   {
+      assert(index > INT16_MIN && index <= INT16_MAX);
+      if (!has_rar_dependency(id))
+         rar_dependency_ids.push_back(id);
+      rar_dependencies[id] = index;
+   }
 
    /* for moving instructions before the current instruction to after it */
    DownwardsCursor downwards_init(int current_idx, bool improved_rar);
@@ -167,13 +185,13 @@ MoveState::downwards_init(int current_idx, bool improved_rar_)
 
    std::fill(depends_on.begin(), depends_on.end(), false);
    if (improved_rar)
-      rar_dependencies.clear();
+      clear_rar_dependencies();
 
    for (const Operand& op : current->operands) {
       if (op.isTemp()) {
          depends_on[op.tempId()] = true;
          if (improved_rar && op.isFirstKill())
-            rar_dependencies[op.tempId()] = -1;
+            set_rar_dependency(op.tempId(), -1);
       }
    }
 
@@ -200,7 +218,7 @@ MoveState::downwards_check_deps(Instruction* instr, Temp* rar_dep)
       if (!improved_rar && depends_on[op.tempId()])
          return move_fail_rar;
 
-      if (improved_rar && rar_dependencies.count(op.tempId())) {
+      if (improved_rar && has_rar_dependency(op.tempId())) {
          /* We allow for exactly one read-after-read dependency. */
          if (rar_dep && (*rar_dep == Temp() || *rar_dep == op.getTemp()))
             *rar_dep = op.getTemp();
@@ -284,7 +302,7 @@ MoveState::downwards_move_clause(DownwardsCursor& cursor)
    /* Remove instruction operands from rar_dependencies as the clause won't be moved further. */
    for (const Operand& op : current->operands) {
       if (op.isTemp() && op.isFirstKill())
-         rar_dependencies.erase(op.tempId());
+         rar_dependencies[op.tempId()] = INT16_MIN;
    }
 
    /* Check if one of candidates' operands is killed by depending instruction. */
@@ -391,7 +409,7 @@ MoveState::downwards_skip(DownwardsCursor& cursor)
       if (op.isTemp()) {
          depends_on[op.tempId()] = true;
          if (improved_rar && op.isFirstKill())
-            rar_dependencies[op.tempId()] = cursor.source_idx - cursor.insert_idx;
+            set_rar_dependency(op.tempId(), cursor.source_idx - cursor.insert_idx);
       }
    }
    cursor.total_demand.update(instr->register_demand);
@@ -423,7 +441,7 @@ MoveState::upwards_init(int source_idx, bool improved_rar_)
    improved_rar = improved_rar_;
 
    std::fill(depends_on.begin(), depends_on.end(), false);
-   rar_dependencies.clear();
+   clear_rar_dependencies();
 
    for (const Definition& def : current->definitions) {
       if (def.isTemp())
@@ -466,7 +484,7 @@ MoveState::upwards_move(UpwardsCursor& cursor)
 
    /* check if candidate uses/kills an operand which is used by a dependency */
    for (const Operand& op : instr->operands) {
-      if (op.isTemp() && (!improved_rar || op.isFirstKill()) && rar_dependencies.count(op.tempId()))
+      if (op.isTemp() && (!improved_rar || op.isFirstKill()) && has_rar_dependency(op.tempId()))
          return move_fail_rar;
    }
 
@@ -509,7 +527,7 @@ MoveState::upwards_skip(UpwardsCursor& cursor)
       }
       for (const Operand& op : instr->operands) {
          if (op.isTemp())
-            rar_dependencies[op.tempId()] = cursor.source_idx - cursor.insert_idx;
+            set_rar_dependency(op.tempId(), cursor.source_idx - cursor.insert_idx);
       }
       cursor.total_demand.update(instr->register_demand);
    }
@@ -523,7 +541,8 @@ memory_sync_info
 get_sync_info_with_hack(const Instruction* instr)
 {
    memory_sync_info sync = get_sync_info(instr);
-   if (instr->isSMEM() && !instr->operands.empty() && instr->operands[0].bytes() == 16) {
+   if (instr->isSMEM() && !instr->operands.empty() && instr->operands[0].bytes() == 16 &&
+       (!sync.storage || (sync.semantics & semantic_private))) {
       // FIXME: currently, it doesn't seem beneficial to omit this due to how our scheduler works
       sync.storage = (storage_class)(sync.storage | storage_buffer);
       sync.semantics =
@@ -639,6 +658,17 @@ add_to_hazard_query(hazard_query* query, Instruction* instr)
          query->writes_exec = true;
    }
 
+   /* Vector ALU instructions have no memory or control-barrier events. */
+   if (instr->isVALU() || instr->isVINTRP()) {
+#ifndef NDEBUG
+      memory_sync_info sync = get_sync_info_with_hack(instr);
+      assert(!sync.storage && !sync.semantics);
+      assert(!is_atomic_or_control_instr(query->program, instr, sync,
+                                         semantic_acquire | semantic_release));
+#endif
+      return;
+   }
+
    memory_sync_info sync = get_sync_info_with_hack(instr);
 
    add_memory_event(query->program, &query->mem_events, instr, &sync);
@@ -671,46 +701,9 @@ enum HazardResult {
 };
 
 HazardResult
-perform_hazard_query(hazard_query* query, Instruction* instr, bool upwards)
+perform_hazard_query_non_valu(hazard_query* query, Instruction* instr, bool upwards)
 {
-   /* don't schedule discards downwards */
-   if (!upwards && instr->opcode == aco_opcode::p_exit_early_if_not)
-      return hazard_fail_unreorderable;
-
-   /* In Primitive Ordered Pixel Shading, await overlapped waves as late as possible, and notify
-    * overlapping waves that they can continue execution as early as possible.
-    */
-   if (upwards) {
-      if (instr->opcode == aco_opcode::p_pops_gfx9_add_exiting_wave_id ||
-          is_wait_export_ready(query->gfx_level, instr)) {
-         return hazard_fail_unreorderable;
-      }
-   } else {
-      if (instr->opcode == aco_opcode::p_pops_gfx9_ordered_section_done) {
-         return hazard_fail_unreorderable;
-      }
-   }
-
-   if (query->uses_exec || query->writes_exec) {
-      for (const Definition& def : instr->definitions) {
-         if (def.isFixed() && def.physReg() == exec)
-            return hazard_fail_exec;
-      }
-   }
-   if (query->writes_exec && needs_exec_mask(instr))
-      return hazard_fail_exec;
-
-   /* Don't move exports so that they stay closer together.
-    * Since GFX11, export order matters. MRTZ must come first,
-    * then color exports sorted from first to last.
-    * Also, with Primitive Ordered Pixel Shading on GFX11+, the `done` export must not be moved
-    * above the memory accesses before the queue family scope (more precisely, fragment interlock
-    * scope, but it's not available in ACO) release barrier that is expected to be inserted before
-    * the export, as well as before any `s_wait_event export_ready` which enters the ordered
-    * section, because the `done` export exits the ordered section.
-    */
-   if (instr->isEXP() || instr->opcode == aco_opcode::p_dual_src_export_gfx11)
-      return hazard_fail_export;
+   assert(!instr->isVALU() && !instr->isVINTRP());
 
    memory_event_set instr_set;
    memset(&instr_set, 0, sizeof(instr_set));
@@ -778,6 +771,55 @@ perform_hazard_query(hazard_query* query, Instruction* instr, bool upwards)
       return hazard_fail_barrier;
 
    return hazard_success;
+}
+
+HazardResult
+perform_hazard_query(hazard_query* query, Instruction* instr, bool upwards)
+{
+   /* don't schedule discards downwards */
+   if (!upwards && instr->opcode == aco_opcode::p_exit_early_if_not)
+      return hazard_fail_unreorderable;
+
+   /* In Primitive Ordered Pixel Shading, await overlapped waves as late as possible, and notify
+    * overlapping waves that they can continue execution as early as possible.
+    */
+   if (upwards) {
+      if (instr->opcode == aco_opcode::p_pops_gfx9_add_exiting_wave_id ||
+          is_wait_export_ready(query->gfx_level, instr)) {
+         return hazard_fail_unreorderable;
+      }
+   } else {
+      if (instr->opcode == aco_opcode::p_pops_gfx9_ordered_section_done) {
+         return hazard_fail_unreorderable;
+      }
+   }
+
+   if (query->uses_exec || query->writes_exec) {
+      for (const Definition& def : instr->definitions) {
+         if (def.isFixed() && def.physReg() == exec)
+            return hazard_fail_exec;
+      }
+   }
+   if (query->writes_exec && needs_exec_mask(instr))
+      return hazard_fail_exec;
+
+   /* Don't move exports so that they stay closer together.
+    * Since GFX11, export order matters. MRTZ must come first,
+    * then color exports sorted from first to last.
+    * Also, with Primitive Ordered Pixel Shading on GFX11+, the `done` export must not be moved
+    * above the memory accesses before the queue family scope (more precisely, fragment interlock
+    * scope, but it's not available in ACO) release barrier that is expected to be inserted before
+    * the export, as well as before any `s_wait_event export_ready` which enters the ordered
+    * section, because the `done` export exits the ordered section.
+    */
+   if (instr->isEXP() || instr->opcode == aco_opcode::p_dual_src_export_gfx11)
+      return hazard_fail_export;
+
+   /* Exec hazards were checked above; vector ALU has no remaining hazards. */
+   if (instr->isVALU() || instr->isVINTRP())
+      return hazard_success;
+
+   return perform_hazard_query_non_valu(query, instr, upwards);
 }
 
 unsigned
@@ -1421,6 +1463,7 @@ schedule_program(Program* program)
    ctx.gfx_level = program->gfx_level;
    ctx.program = program;
    ctx.mv.depends_on.resize(program->peekAllocationId());
+   ctx.mv.rar_dependencies.resize(program->peekAllocationId(), INT16_MIN);
 
    const int wave_factor = program->gfx_level >= GFX10 ? 2 : 1;
    const int wave_minimum = std::max<int>(program->min_waves, 4 * wave_factor);

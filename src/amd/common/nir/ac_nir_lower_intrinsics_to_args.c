@@ -185,7 +185,14 @@ lower_intrinsic_to_arg(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       }
       break;
    case nir_intrinsic_load_num_workgroups:
-      if (s->options->load_grid_size_from_user_sgpr) {
+      if (b->shader->info.stage == MESA_SHADER_MESH &&
+          s->args->args[s->args->num_work_groups.arg_index].size == 2) {
+         /* Xclipse: the grid arrives through DRAW_INDIRECT's two user data words,
+          * x | y << 16 and z. */
+         nir_def *g = ac_nir_load_arg(b, s->args, s->args->num_work_groups);
+         nir_def *xy = nir_channel(b, g, 0);
+         replacement = nir_vec3(b, nir_iand_imm(b, xy, 0xffff), nir_ushr_imm(b, xy, 16), nir_channel(b, g, 1));
+      } else if (s->options->load_grid_size_from_user_sgpr) {
          replacement = ac_nir_load_arg(b, s->args, s->args->num_work_groups);
       } else {
          nir_def *addr = nir_pack_64_2x32(b, ac_nir_load_arg(b, s->args, s->args->num_work_groups));

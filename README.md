@@ -4,6 +4,14 @@ A port of Mesa's RADV Vulkan driver to Samsung Xclipse GPUs on Android, based on
 27.0.0-devel. Every Xclipse GPU so far is supported: the 920, 530, 940, 540, 550, 950 and 960 (see
 [Compatibility](#compatibility)).
 
+One source tree builds three packages:
+
+| Package | Script | For |
+|---|---|---|
+| Android | `build.sh`, `build.cmd` | emulators that load a custom Vulkan driver from a zip |
+| Android with Wayland | `build-wayland.sh` | Bannerlator's Wayland mode |
+| Linux (glibc) | `build-glibc.sh` | Termux PRoot distributions and DroidDeck |
+
 ## Requirements
 
 Tools:
@@ -58,6 +66,73 @@ Termux repository, which the script downloads.
 This build needs a Linux x86-64 machine (WSL works) with `patchelf`, `curl`, `ar` and `tar` on top
 of the tools above. The build goes to `build-android-wayland/` (`BUILD_DIR` changes it).
 
+### Linux (glibc): Termux PRoot distributions and DroidDeck
+
+```sh
+./build-glibc.sh                        # inside the distribution on the phone
+./build-glibc.sh aarch64-linux-gnu.ini  # cross build from an x86-64 Linux machine
+```
+
+Builds the driver as a regular glibc Linux driver with X11 and Wayland presentation, for Debian,
+Ubuntu and other distributions under Termux and proot-distro, and for DroidDeck. It writes
+`dist/radv-xclipse-glibc-<version>-<commit>.zip` with the driver, its Vulkan ICD file, `install.sh`,
+`meta.json` (DroidDeck imports the zip as a Linux Vulkan driver), a short README and the notices.
+The build goes to `build-glibc/` (`BUILD_DIR` changes it; `MESON_ARGS` adds configure options).
+
+On the phone, inside the distribution (Debian 12 or Ubuntu 24.04 and newer have every package):
+
+```sh
+apt install build-essential pkg-config python3-venv glslang-tools \
+   libx11-xcb-dev libxcb1-dev libxcb-dri3-dev libxcb-present-dev libxcb-randr0-dev \
+   libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev libxrandr-dev libxshmfence-dev \
+   libwayland-dev libwayland-bin
+python3 -m venv ~/mesa-venv
+~/mesa-venv/bin/pip install meson ninja mako packaging
+export PATH=~/mesa-venv/bin:$PATH
+```
+
+This build also downloads wayland-protocols 1.41 at the first configure.
+
+#### Cross building
+
+Build against an arm64 Debian or Ubuntu root filesystem that has the packages above, with a Meson
+cross file:
+
+```ini
+[binaries]
+c = ['clang', '--target=aarch64-linux-gnu', '--sysroot=/path/to/arm64-root']
+cpp = ['clang++', '--target=aarch64-linux-gnu', '--sysroot=/path/to/arm64-root']
+c_ld = 'lld'
+cpp_ld = 'lld'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+pkg-config = 'pkg-config'
+
+[properties]
+sys_root = '/path/to/arm64-root'
+pkg_config_libdir = ['/path/to/arm64-root/usr/lib/aarch64-linux-gnu/pkgconfig',
+                     '/path/to/arm64-root/usr/share/pkgconfig']
+
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+```
+
+The `wayland-scanner` that generates the protocol code has to be the version of the root
+filesystem's libwayland: code from a newer scanner calls functions an older libwayland does not
+have, and the driver then fails to load. If the build machine's own scanner is a different version,
+build that version of `wayland-scanner` and name it:
+
+```sh
+WAYLAND_SCANNER=/path/to/wayland-scanner ./build-glibc.sh aarch64-linux-gnu.ini
+```
+
+The driver needs the glibc and the libwayland-client of the root filesystem it was built against,
+or newer: build against Debian 11 (glibc 2.31, libwayland 1.18) to run on Debian 11, Ubuntu 20.04
+and everything newer. The packaged `README.txt` covers installing and running it.
+
 ## Compatibility
 
 | GPU | Codename | Phones and tablets, for example | Ray tracing |
@@ -75,7 +150,8 @@ games until a later release fixes them.
 
 ## Runtime switches
 
-Each switch is an environment variable or, for apps that cannot set one, an Android property.
+Each switch is an environment variable or, for apps that cannot set one, an Android property. The
+glibc build reads only the environment variables, and `RADV_XCLIPSE_LOG` prints to stderr there.
 
 | Property | Environment | Effect |
 |---|---|---|
@@ -98,7 +174,9 @@ Each switch is an environment variable or, for apps that cannot set one, an Andr
 | `debug.radv_xclipse_pace` | `RADV_XCLIPSE_PACE` | Xclipse 920 only: `0` stops holding back the app's GPU work when it runs uncapped (vsync off), which otherwise keeps the Android UI responsive; `2` holds it back even for short jobs |
 | `debug.radv_xclipse_nopf` | `RADV_XCLIPSE_NOPF` | `1` stops prefetching shaders and vertex descriptors into the GPU cache, `0` prefetches them; off by default on the Xclipse 940, 540, 550, 950 and 960 (prefetching froze the 940, and their vendor driver never prefetches) |
 | `debug.radv_xclipse_bc6h_rgba16f` | `RADV_XCLIPSE_BC6H_RGBA16F` | `1` decodes BC6H (unsigned) textures to RGBA16F again instead of the half-size B10G11R11 format |
-| `debug.radv_xclipse_pbb` | `RADV_XCLIPSE_PBB` | `1` bins draws with the vendor driver's binner settings (on the Xclipse 920 and 530, whose values are known), `0` with upstream's |
+| `debug.radv_xclipse_pbb` | `RADV_XCLIPSE_PBB` | `0` bins draws with upstream's settings instead of the vendor driver's (used by default on the Xclipse 920; `1` also turns them on for the 530) |
+| `debug.radv_xclipse_tfq` | `RADV_XCLIPSE_TFQ` | `0` turns off the vendor driver's texture filtering optimisations (on by default: the same samples as the vendor driver, and faster mipmapped and anisotropic texturing) for exact filtering |
+| `debug.radv_xclipse_mesh` | `RADV_XCLIPSE_MESH` | `0` hides `VK_EXT_mesh_shader` |
 | `debug.radv_xclipse_dbflush` | `RADV_XCLIPSE_DBFLUSH` | `0` flushes the depth caches the upstream way again instead of the vendor driver's way |
 | `debug.radv_xclipse_llc` | `RADV_XCLIPSE_LLC` | Xclipse 960 only: `1` restates the vendor driver's GPU cache policy on every submit |
 | `debug.mesa.radv.perftest` | `RADV_PERFTEST` | `nggc` turns NGG culling back on (off by default on Xclipse: slower with many draws) |

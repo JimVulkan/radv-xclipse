@@ -556,6 +556,10 @@ static bool ac_is_modifier_supported_gfx9(const struct radeon_info *info,
    case GFX10:
    case GFX10_3:
       allowed_swizzles = ac_modifier_has_dcc(modifier) ? 0x08000000 : 0x0E660660;
+      /* Xclipse: Samsung gralloc lays GPU-only buffers out as SW_4KB_R_X (byte-identical to the
+       * vendor's, probe/gfx/ahbmod). Accepted for import only, never advertised. */
+      if (info->xclipse_model != AC_XCLIPSE_NONE && !ac_modifier_has_dcc(modifier))
+         allowed_swizzles |= 1u << ADDR_SW_4KB_R_X;
       break;
    case GFX11:
    case GFX11_5:
@@ -3272,11 +3276,24 @@ static int gfx9_compute_surface(struct ac_addrlib *addrlib, const struct radeon_
    const bool only_stencil =
       (surf->flags & RADEON_SURF_SBUFFER) && !(surf->flags & RADEON_SURF_ZBUFFER);
 
+   /* Xclipse (GFX10.3): addrlib's Gfx10Lib rejects SW_4KB_R_X (Samsung gralloc's GPU-only layout). It has
+    * the 4KB_D_X block size, padding and alignment, so lay the surface out as D_X and give the
+    * hardware R_X: probe/gfx/ahbmod decodes the vendor's buffer byte for byte that way. */
+   const bool xclipse_4k_r_x = info->xclipse_model != AC_XCLIPSE_NONE &&
+                               info->gfx_level < GFX11 && AddrSurfInfoIn.swizzleMode == ADDR_SW_4KB_R_X;
+   if (xclipse_4k_r_x)
+      AddrSurfInfoIn.swizzleMode = ADDR_SW_4KB_D_X;
+
    /* Calculate texture layout information. */
    if (!only_stencil) {
       r = gfx9_compute_miptree(addrlib, info, config, surf, compressed, &AddrSurfInfoIn);
       if (r)
          return r;
+   }
+
+   if (xclipse_4k_r_x) {
+      AddrSurfInfoIn.swizzleMode = ADDR_SW_4KB_R_X;
+      surf->u.gfx9.swizzle_mode = ADDR_SW_4KB_R_X;
    }
 
    /* Calculate texture layout information for stencil. */

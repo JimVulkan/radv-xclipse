@@ -19,6 +19,9 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <linux/dma-buf.h>
 #include <inttypes.h>
 #include <string.h>
 
@@ -29,9 +32,9 @@ struct fallback_gralloc {
 
 /* returns # of fds, and by reference the actual fds */
 static unsigned
-get_native_buffer_fds(const native_handle_t *handle, int fds[3])
+get_native_buffer_fds(const native_handle_t *handle, int *fds, unsigned capacity)
 {
-   if (!handle)
+   if (!handle || handle->numFds <= 0 || (unsigned)handle->numFds > capacity)
       return 0;
 
    /*
@@ -81,6 +84,64 @@ largest_handle_fd(const native_handle_t *handle)
 #define SEC_HND_NUM_BUFS     40 /* dma-bufs: plane i is in data[i] when this is > 1, else all in data[0] */
 #define SEC_HND_PLANE0       41 /* per plane: size, offset, byte stride, alloc width, alloc height */
 #define SEC_HND_PLANE_INTS   10
+/* Layout 2 (GPU-only usage on the 940, 2026-11-08 probe/gfx/ahbstride AHBDUMP): the pixels are
+ * SW_4KB_R_X tiles at the pixel stride, then DCC metadata, one byte per 256 B block, from
+ * data[82] (= the plane size) to data[81]. Equal when there is none (linear buffers). */
+#define SEC_HND_META_END     81
+#define SEC_HND_META_OFFSET  82
+
+/* AMD modifier for a GFX10.3 SW_4KB_R_X surface without DCC (TILE 23 = ADDR_SW_4KB_R_X). The
+ * pipe-xor and packer fields only have to pass validation: the hardware applies the XOR. */
+#define SEC_MOD_4K_R_X                                                                             \
+   (AMD_FMT_MOD | AMD_FMT_MOD_SET(TILE_VERSION, AMD_FMT_MOD_TILE_VER_GFX10_RBPLUS) |               \
+    AMD_FMT_MOD_SET(TILE, 23) | AMD_FMT_MOD_SET(PIPE_XOR_BITS, 2) | AMD_FMT_MOD_SET(PACKERS, 1))
+/* The 920 lays the same buffers out as SW_64KB_R_X (128x128 tiles at 4 bytes per pixel; alloc
+ * width and height padded to 128, 2988x1384 -> 3072x1408; 2026-11-09 ahbstride AHBDUMP). */
+#define SEC_MOD_64K_R_X                                                                            \
+   (AMD_FMT_MOD | AMD_FMT_MOD_SET(TILE_VERSION, AMD_FMT_MOD_TILE_VER_GFX10_RBPLUS) |               \
+    AMD_FMT_MOD_SET(TILE, AMD_FMT_MOD_TILE_GFX9_64K_R_X) | AMD_FMT_MOD_SET(PIPE_XOR_BITS, 2) |     \
+    AMD_FMT_MOD_SET(PACKERS, 1))
+
+/* Mark every block of a layout-2 buffer uncompressed (DCC key 0xFF). A fresh buffer has keys of
+ * 0, which the vendor driver reads as a fast clear to black, so anything we render into it shows
+ * black on the other side unless the keys say "uncompressed". We never write compressed data,
+ * so this holds for as long as we are the writer. Contents the vendor compressed earlier are
+ * lost; we could not read those anyway (no DCC decode for this layout). */
+/* The 920 (Exynos 2200, s5e9925) lays out layout-2 buffers in 64 KB tiles, the 940 in 4 KB. */
+static bool
+sec_soc_is_920(void)
+{
+   static int cached = -1;
+   if (cached < 0) {
+      char v[PROP_VALUE_MAX] = "";
+      __system_property_get("ro.soc.model", v);
+      cached = !strcmp(v, "s5e9925");
+   }
+   return cached;
+}
+
+static void
+sec_mark_uncompressed(const native_handle_t *handle)
+{
+   const uint64_t start = (uint32_t)handle->data[SEC_HND_META_OFFSET];
+   const uint64_t end = (uint32_t)handle->data[SEC_HND_META_END];
+   const int fd = handle->data[0];
+   if (end <= start || fd < 0)
+      return;
+   const off_t size = lseek(fd, 0, SEEK_END);
+   lseek(fd, 0, SEEK_SET);
+   if (size <= 0 || (uint64_t)size < end)
+      return;
+   uint8_t *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+   if (map == MAP_FAILED)
+      return;
+   struct dma_buf_sync sync = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW};
+   ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+   memset(map + start, 0xff, end - start);
+   sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
+   ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+   munmap(map, size);
+}
 
 /* Allocated formats of the YUV buffers, measured on SM-S908B with probe/gfx/grhandle.c. A
  * YCbCr_420_888 request is allocated as Exynos NV12M: Y and CbCr in two dma-bufs, each plane at
@@ -164,18 +225,18 @@ samsung_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
    const int format = handle->data[SEC_HND_ALLOC_FORMAT];
    const int num_planes = handle->data[SEC_HND_NUM_PLANES];
 
-   /* data[38] is the layout: 1 linear, 2 the vendor's compressed tiling (GPU-only usage on the 530
-    * and 940, composer buffers everywhere). Nothing here can describe the latter, so it is still
-    * imported as linear, and its contents will not match the vendor's: say so, once, with
+   /* data[38] is the layout: 1 linear, 2 the vendor's tiling (GPU-only usage on the 530 and 940,
+    * composer buffers everywhere). Layout 2 is described below for 4-byte formats only; any
+    * other is still imported as linear and will not match the vendor's: say so, once, with
     * debug.radv_xclipse_log >= 1. */
    if (handle->data[SEC_HND_LAYOUT] != 1) {
       static bool warned;
       if (!warned) {
          warned = true;
          if (u_xclipse_log_on())
-            mesa_logw("Samsung gralloc: buffer %dx%d with non-linear layout %d imported as linear; "
-                      "contents will not match other users of it",
-                      handle->data[SEC_HND_WIDTH], handle->data[SEC_HND_HEIGHT], handle->data[SEC_HND_LAYOUT]);
+            mesa_logw("Samsung gralloc: buffer %dx%d format 0x%x with non-linear layout %d",
+                      handle->data[SEC_HND_WIDTH], handle->data[SEC_HND_HEIGHT], format,
+                      handle->data[SEC_HND_LAYOUT]);
       }
    }
    if (num_planes != 1 || is_hal_format_yuv(format))
@@ -219,6 +280,21 @@ samsung_gralloc_get_buffer_info(struct u_gralloc_buffer_handle *hnd,
    out->offsets[0] = offset;
    out->strides[0] = stride;
 
+   /* Layout 2 at 4 bytes per pixel: R_X tiles at the pixel stride. The tile size is per SoC:
+    * 4 KB on the 940 (alloc dims padded to 32, 2246x1080 -> 2272x1088), 64 KB on the 920 (padded
+    * to 128, 2988x1384 -> 3072x1408; 2048x1152 is 64 KB too). The padding decides when it can;
+    * when width and height are multiples of 128 both fit, and the SoC decides (s5e9925 = 920).
+    * The DCC meta size cannot tell them apart (512x512-pixel blocks of 4 KB on both). Other
+    * sizes are not measured yet and stay linear. */
+   if (handle->data[SEC_HND_LAYOUT] == 2 && stride == pixel_stride * 4 && pixel_stride % 32 == 0 &&
+       offset == 0) {
+      const bool fits_64k = pixel_stride % 128 == 0 && alloc_h % 128 == 0 && alloc_h >= height;
+      const bool fits_4k = pixel_stride == ((width + 31) & ~31ull) && alloc_h == ((height + 31) & ~31ull);
+      const bool tiles_64k = fits_64k && (!fits_4k || sec_soc_is_920());
+      out->modifier = tiles_64k ? SEC_MOD_64K_R_X : SEC_MOD_4K_R_X;
+      sec_mark_uncompressed(handle);
+   }
+
    return 0;
 }
 #endif /* HAS_SAMSUNG_GRALLOC */
@@ -235,7 +311,7 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
    int fds[3];
    int ret;
 
-   num_fds = get_native_buffer_fds(hnd->handle, fds);
+   num_fds = get_native_buffer_fds(hnd->handle, fds, ARRAY_SIZE(fds));
    if (num_fds == 0)
       return -EINVAL;
 
@@ -270,10 +346,11 @@ fallback_gralloc_get_yuv_info(struct u_gralloc *gralloc,
       if (out->num_planes == 3)
          out->fds[2] = fds[0];
    } else {
-      assert(num_fds == out->num_planes);
-      out->fds[0] = fds[0];
-      out->fds[1] = fds[1];
-      out->fds[2] = fds[2];
+      /* Handles may carry more fds than planes (an attribute region after the planes). */
+      if (num_fds < out->num_planes)
+         return -EINVAL;
+      for (unsigned i = 0; i < out->num_planes; i++)
+         out->fds[i] = fds[i];
    }
 
    return 0;

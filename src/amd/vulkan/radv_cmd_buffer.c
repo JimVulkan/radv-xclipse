@@ -4514,6 +4514,8 @@ radv_emit_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
          radv_emit_mesh_shader(cmd_buffer);
          break;
       case MESA_SHADER_TASK:
+         if (pdev->xclipse_taskmesh_emul)
+            break;
          radv_emit_compute_shader(pdev, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK], false);
          break;
       default:
@@ -9879,6 +9881,19 @@ radv_bind_fragment_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 static void
 radv_bind_task_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *ts)
 {
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   if (pdev->xclipse_taskmesh_emul) {
+      /* The task shader runs on the GFX stream, see radv_xclipse_emit_task_draw. */
+      if (!radv_xclipse_task_bo(device)) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return;
+      }
+      cmd_buffer->queue_state.task_rings_needed = true;
+      return;
+   }
+
    if (!radv_gang_init(cmd_buffer))
       return;
 
@@ -12488,9 +12503,14 @@ radv_emit_userdata_mesh(struct radv_cmd_buffer *cmd_buffer, const struct radv_ta
    } else {
       radeon_set_sh_reg_seq(state->vtx_base_sgpr, state->vtx_emit_num);
       if (uses_grid_size) {
-         radeon_emit(userdata->x);
-         radeon_emit(userdata->y);
-         radeon_emit(userdata->z);
+         if (pdev->xclipse_taskmesh_emul) {
+            radeon_emit(userdata->x | (userdata->y << 16));
+            radeon_emit(userdata->z);
+         } else {
+            radeon_emit(userdata->x);
+            radeon_emit(userdata->y);
+            radeon_emit(userdata->z);
+         }
       }
       if (uses_drawid)
          radeon_emit(0);
@@ -15057,6 +15077,10 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    struct radv_cmd_stream *ace_cs = cmd_buffer->gang.cs;
    struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
 
+   /* Xclipse: no ACE stream, radv_xclipse_emit_task_draw emits the whole task state. */
+   if (radv_device_physical(device)->xclipse_taskmesh_emul)
+      task_shader = NULL;
+
    assert(!task_shader || ace_cs);
 
    const VkShaderStageFlags stages =
@@ -15093,6 +15117,8 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    if (userdata) {
       if (task_shader) {
          radv_emit_userdata_task(device, &cmd_buffer->state, cmd_buffer->gang.cs, userdata);
+      } else if (cmd_buffer->state.shaders[MESA_SHADER_TASK]) {
+         /* Xclipse: the grid comes from the draw ring. */
       } else {
          radv_emit_userdata_mesh(cmd_buffer, userdata);
       }
@@ -15426,6 +15452,300 @@ radv_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDraw
    radv_after_draw(cmd_buffer);
 }
 
+/* Xclipse task/mesh emulation.
+ *
+ * The firmware has no working DISPATCH_MESH/TASKMESH packets (they hang the GPU) and the kernel
+ * has no gang submit, so:
+ * - A mesh-only indirect draw converts the application's commands to DRAW_INDIRECT commands with
+ *   a compute shader, one vertex per mesh workgroup, the grid packed into the two user data words
+ *   the CP fills (x | y << 16, z).
+ * - A task shader runs as a compute dispatch on the GFX stream. Each task workgroup writes a
+ *   DRAW_INDIRECT command into the draw ring, and a DRAW_INDIRECT_MULTI over the ring launches the
+ *   mesh workgroups with the draw index as the ring entry.
+ */
+static void
+radv_xclipse_emit_mesh_draw_indirect(struct radv_cmd_buffer *cmd_buffer, uint64_t data_va, uint32_t draw_count,
+                                     uint64_t count_va, uint32_t draw_index_reg)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const uint32_t view_mask = cmd_buffer->state.render.view_mask;
+   const bool predicating = cmd_buffer->state.cond_render.enabled;
+   const uint32_t base_reg = cmd_buffer->state.vtx_base_sgpr;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   assert(base_reg);
+
+   radeon_check_space(device->ws, cs->b, 32 + 16 * util_bitcount(view_mask));
+   radv_invalidate_vertex_draw_state(cmd_buffer);
+   radv_emit_indirect_buffer(cs, data_va, false);
+
+   const uint32_t vertex_offset_reg = (base_reg - SI_SH_REG_OFFSET) >> 2;
+   const unsigned num_views = MAX2(1, util_bitcount(view_mask));
+   uint32_t views = view_mask;
+
+   for (unsigned v = 0; v < num_views; v++) {
+      if (view_mask) {
+         const unsigned view = u_bit_scan(&views);
+         radv_emit_view_index(pdev, &cmd_buffer->state, cs, view);
+      }
+
+      radeon_begin(cs);
+      radeon_emit(PKT3(PKT3_DRAW_INDIRECT_MULTI, 8, predicating));
+      radeon_emit(0);
+      radeon_emit(vertex_offset_reg);
+      radeon_emit(vertex_offset_reg + 1);
+      radeon_emit(draw_index_reg | S_2C4_DRAW_INDEX_ENABLE(!!draw_index_reg) | S_2C4_COUNT_INDIRECT_ENABLE(!!count_va));
+      radeon_emit(draw_count);
+      radeon_emit(count_va);
+      radeon_emit(count_va >> 32);
+      radeon_emit(16);
+      radeon_emit(V_0287F0_DI_SRC_SEL_AUTO_INDEX);
+      radeon_end();
+   }
+
+   cmd_buffer->state.uses_draw_indirect = true;
+}
+
+/* Convert the application's commands. Returns the address of the 16-byte records. */
+static uint64_t
+radv_xclipse_convert_draw_mesh_tasks(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info,
+                                     uint32_t max_count, bool task)
+{
+   unsigned offset;
+
+   if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, max_count * 16, 16, &offset, NULL)) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return 0;
+   }
+
+   const uint64_t dst_va = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + offset;
+
+   radv_xclipse_convert_mesh_tasks(cmd_buffer, info->indirect_va, info->stride, info->count_va, max_count, task,
+                                   dst_va);
+   return dst_va;
+}
+
+static void
+radv_xclipse_emit_task_state(struct radv_cmd_buffer *cmd_buffer)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
+   struct radv_descriptor_state *descriptors_state =
+      radv_get_descriptors_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   const struct radv_push_constant_state *push_constants =
+      radv_get_push_constants_state(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   const uint64_t rings_va = radv_buffer_get_va(device->xclipse_task_bo);
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+   uint64_t va = 0;
+
+   radv_cs_add_buffer(device->ws, cs->b, device->xclipse_task_bo);
+   radv_cs_add_buffer(device->ws, cs->b, task_shader->bo);
+
+   radeon_check_space(device->ws, cs->b, 256 + MAX_SETS * 4);
+
+   radv_emit_compute_shader(pdev, cs, task_shader, false);
+
+   if (descriptors_state->valid)
+      radv_emit_descriptors_per_stage(device, cs, task_shader, descriptors_state);
+   radv_emit_descriptor_heaps_per_stage(device, cs, task_shader, descriptors_state, cmd_buffer->descriptor_heaps);
+
+   if (descriptors_state->dynamic_offset_count) {
+      radv_upload_dynamic_descriptors(cmd_buffer, descriptors_state, &va);
+      radv_emit_userdata_address(device, cs, task_shader, AC_UD_DYNAMIC_DESCRIPTORS, va);
+   }
+
+   va = 0;
+   if (push_constants->need_upload)
+      radv_upload_push_constants(cmd_buffer, push_constants, &va);
+   radv_emit_push_constants_per_stage(device, cs, task_shader, (uint32_t *)cmd_buffer->push_constants, va);
+
+   const uint32_t ring_offsets_loc = radv_get_user_sgpr_loc(task_shader, AC_UD_CS_TASK_RING_OFFSETS);
+   if (ring_offsets_loc) {
+      radeon_begin(cs);
+      radeon_set_sh_reg_seq(ring_offsets_loc, 2);
+      radeon_emit(rings_va);
+      radeon_emit(rings_va >> 32);
+      radeon_end();
+   }
+}
+
+/* One task dispatch followed by the mesh draws it produced. indirect_va != 0 reads the grid from
+ * memory. Ring entries [0, n) are used, counted from the workgroup 'first' along x. */
+static void
+radv_xclipse_emit_task_dispatch_draw(struct radv_cmd_buffer *cmd_buffer, const uint32_t grid[3], uint32_t first,
+                                     uint32_t n, uint64_t indirect_va, uint32_t draw_id)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
+   const struct radv_shader *mesh_shader = cmd_buffer->state.shaders[MESA_SHADER_MESH];
+   const uint32_t grid_loc = radv_get_user_sgpr_loc(task_shader, AC_UD_CS_GRID_SIZE);
+   const uint32_t draw_id_loc = radv_get_user_sgpr_loc(task_shader, AC_UD_CS_TASK_DRAW_ID);
+   const uint32_t ring_entry_loc = radv_get_user_sgpr_loc(task_shader, AC_UD_TASK_RING_ENTRY);
+   const uint64_t rings_va = radv_buffer_get_va(device->xclipse_task_bo);
+   const uint64_t draw_ring_va = rings_va + pdev->task_info.draw_ring_offset;
+   const uint32_t max_entries = pdev->task_info.num_entries - 1;
+   const uint64_t count_va = draw_ring_va + (uint64_t)max_entries * AC_TASK_DRAW_ENTRY_BYTES;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+   uint32_t initiator = device->dispatch_initiator | S_00B800_CS_W32_EN(task_shader->info.wave_size == 32);
+
+   /* Mesh shaders of an earlier draw may still read the payload ring. */
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS;
+   radv_emit_cache_flush(cmd_buffer, false);
+
+   radeon_check_space(device->ws, cs->b, 64);
+
+   {
+      radeon_begin(cs);
+      if (ring_entry_loc)
+         radeon_set_sh_reg(ring_entry_loc, 0u - first);
+      if (draw_id_loc)
+         radeon_set_sh_reg(draw_id_loc, draw_id);
+      radeon_end();
+   }
+
+   if (indirect_va) {
+      /* No task workgroup runs for an empty grid, so the count has to start at zero. */
+      ac_emit_cp_copy_data(cs->b, COPY_DATA_IMM, COPY_DATA_DST_MEM, 0, count_va, AC_CP_COPY_DATA_WR_CONFIRM, false);
+
+      radeon_begin(cs);
+      if (grid_loc) {
+         radeon_emit(PKT3(PKT3_LOAD_SH_REG_INDEX, 3, 0));
+         radeon_emit(indirect_va);
+         radeon_emit(indirect_va >> 32);
+         radeon_emit((grid_loc - SI_SH_REG_OFFSET) >> 2);
+         radeon_emit(3);
+      }
+      radeon_emit(PKT3(PKT3_SET_BASE, 2, 0) | PKT3_SHADER_TYPE_S(1));
+      radeon_emit(1);
+      radeon_emit(indirect_va);
+      radeon_emit(indirect_va >> 32);
+      radeon_emit(PKT3(PKT3_DISPATCH_INDIRECT, 1, 0) | PKT3_SHADER_TYPE_S(1));
+      radeon_emit(0);
+      radeon_emit(initiator | S_00B800_FORCE_START_AT_000(1));
+      radeon_end();
+   } else {
+      radeon_begin(cs);
+      if (grid_loc) {
+         radeon_set_sh_reg_seq(grid_loc, 3);
+         radeon_emit(grid[0]);
+         radeon_emit(grid[1]);
+         radeon_emit(grid[2]);
+      }
+
+      if (first) {
+         radeon_set_sh_reg_seq(R_00B810_COMPUTE_START_X, 3);
+         radeon_emit(first);
+         radeon_emit(0);
+         radeon_emit(0);
+      } else {
+         initiator |= S_00B800_FORCE_START_AT_000(1);
+      }
+
+      radeon_emit(PKT3(PKT3_DISPATCH_DIRECT, 3, 0) | PKT3_SHADER_TYPE_S(1));
+      radeon_emit(grid[1] == 1 && grid[2] == 1 ? first + n : grid[0]);
+      radeon_emit(grid[1]);
+      radeon_emit(grid[2]);
+      radeon_emit(initiator);
+      radeon_end();
+   }
+
+   /* The CP reads the draw ring and the mesh shaders read the payload. */
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM | AC_BARRIER_INV_SMEM |
+                                   AC_BARRIER_INV_L2 | AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME;
+   radv_emit_cache_flush(cmd_buffer, false);
+
+   if (cmd_buffer->state.uses_drawid) {
+      radeon_check_space(device->ws, cs->b, 4);
+      radeon_begin(cs);
+      radeon_set_sh_reg(cmd_buffer->state.vtx_base_sgpr + 8, draw_id);
+      radeon_end();
+   }
+
+   radv_xclipse_emit_mesh_draw_indirect(cmd_buffer, draw_ring_va, indirect_va ? max_entries : n,
+                                        indirect_va ? count_va : 0,
+                                        radv_get_user_sgpr(mesh_shader, AC_UD_TASK_RING_ENTRY));
+}
+
+static void
+radv_xclipse_emit_task_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info, uint32_t x,
+                            uint32_t y, uint32_t z)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const uint32_t max_entries = pdev->task_info.num_entries - 1;
+   const uint32_t grid[3] = {x, y, z};
+
+   radv_xclipse_emit_task_state(cmd_buffer);
+
+   if (info->indirect_va) {
+      for (uint32_t i = 0; i < info->count; i++)
+         radv_xclipse_emit_task_dispatch_draw(cmd_buffer, grid, 0, 0, info->indirect_va + (uint64_t)i * info->stride, i);
+   } else if (y == 1 && z == 1) {
+      /* More workgroups than ring entries: several passes along x. */
+      for (uint32_t first = 0; first < x; first += max_entries)
+         radv_xclipse_emit_task_dispatch_draw(cmd_buffer, grid, first, MIN2(x - first, max_entries), 0, 0);
+   } else {
+      radv_xclipse_emit_task_dispatch_draw(cmd_buffer, grid, 0, MIN2(x * y * z, max_entries), 0, 0);
+   }
+
+   /* The compute registers now hold the task shader. */
+   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
+   radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+   cmd_buffer->push_constant_stages |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
+   cmd_buffer->state.dirty |= RADV_CMD_DIRTY_COMPUTE_PIPELINE | RADV_CMD_DIRTY_RAY_TRACING_PIPELINE;
+}
+
+#define RADV_XCLIPSE_MAX_TASK_DRAWS 64
+#define RADV_XCLIPSE_MAX_MESH_DRAWS 16384
+
+static void
+radv_xclipse_draw_mesh_tasks_indirect(struct radv_cmd_buffer *cmd_buffer, struct radv_draw_info *info)
+{
+   const bool has_task = radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK);
+
+   if (!info->count)
+      return;
+
+   if (has_task) {
+      info->count = MIN2(info->count, RADV_XCLIPSE_MAX_TASK_DRAWS);
+
+      if (info->count_va) {
+         /* Entries past the count become empty dispatches. */
+         info->indirect_va = radv_xclipse_convert_draw_mesh_tasks(cmd_buffer, info, info->count, true);
+         info->stride = 16;
+         info->count_va = 0;
+      }
+   } else {
+      info->count = MIN2(info->count, RADV_XCLIPSE_MAX_MESH_DRAWS);
+      info->indirect_va = radv_xclipse_convert_draw_mesh_tasks(cmd_buffer, info, info->count, false);
+      info->stride = 16;
+   }
+
+   if (!info->indirect_va)
+      return;
+
+   if (!radv_before_taskmesh_draw(cmd_buffer, info, NULL, false))
+      return;
+
+   if (has_task) {
+      radv_xclipse_emit_task_draw(cmd_buffer, info, 0, 0, 0);
+   } else {
+      const struct radv_cmd_state *state = &cmd_buffer->state;
+      uint32_t draw_index_reg = 0;
+
+      if (state->uses_drawid)
+         draw_index_reg = (state->vtx_base_sgpr + 8 - SI_SH_REG_OFFSET) >> 2;
+
+      radv_xclipse_emit_mesh_draw_indirect(cmd_buffer, info->indirect_va, info->count, info->count_va,
+                                           draw_index_reg);
+   }
+
+   radv_after_draw(cmd_buffer);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 radv_CmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, uint32_t z)
 {
@@ -15451,7 +15771,9 @@ radv_CmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, 
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, &userdata, false))
       return;
 
-   if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+   if (radv_device_physical(device)->xclipse_taskmesh_emul && radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
+      radv_xclipse_emit_task_draw(cmd_buffer, &info, x, y, z);
+   } else if (radv_cmdbuf_has_stage(cmd_buffer, MESA_SHADER_TASK)) {
       radv_emit_direct_taskmesh_draw_packets(device, &cmd_buffer->state, cs, cmd_buffer->gang.cs, x, y, z);
    } else {
       radv_emit_direct_mesh_draw_packet(cmd_buffer, x, y, z);
@@ -15497,6 +15819,11 @@ radv_CmdDrawMeshTasksIndirect2EXT(VkCommandBuffer commandBuffer, const VkDrawInd
    info.count_va = 0;
    info.indexed = false;
    info.instance_count = 0;
+
+   if (pdev->xclipse_taskmesh_emul) {
+      radv_xclipse_draw_mesh_tasks_indirect(cmd_buffer, &info);
+      return;
+   }
 
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, NULL, false))
       return;
@@ -15552,6 +15879,11 @@ radv_CmdDrawMeshTasksIndirectCount2EXT(VkCommandBuffer commandBuffer, const VkDr
    info.count_va = pInfo->countAddressRange.address;
    info.indexed = false;
    info.instance_count = 0;
+
+   if (pdev->xclipse_taskmesh_emul) {
+      radv_xclipse_draw_mesh_tasks_indirect(cmd_buffer, &info);
+      return;
+   }
 
    if (!radv_before_taskmesh_draw(cmd_buffer, &info, NULL, false))
       return;

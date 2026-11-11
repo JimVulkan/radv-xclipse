@@ -127,6 +127,10 @@ struct radv_physical_device {
    /* Whether to inline the compute dispatch size in user sgprs. */
    bool load_grid_size_from_user_sgpr;
 
+   /* Xclipse: task/mesh draws go through compute dispatches and DRAW_INDIRECT (no firmware
+    * task/mesh packets, no gang submit). */
+   bool xclipse_taskmesh_emul;
+
    /* Number of threads per wave. */
    uint8_t ps_wave_size;
    uint8_t cs_wave_size;

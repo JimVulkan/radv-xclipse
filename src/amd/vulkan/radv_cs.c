@@ -47,6 +47,7 @@ radv_cs_emit_cache_flush(struct radeon_winsys *ws, struct radv_cmd_stream *cs, e
       .wait_mem_va = flush_va,
       .wait_mem_number = flush_cnt,
       .eop_bug_va = eop_bug_va,
+      .xclipse_legacy_sync = cs->xclipse_legacy_sync,
    };
 
    radeon_check_space(ws, cs->b, 128);
@@ -61,6 +62,7 @@ radv_init_cmd_stream(const struct radv_device *device, struct radv_cmd_stream *c
 
    cs->buffered_sh_regs.num = 0;
    cs->hw_ip = ip_type;
+   cs->xclipse_legacy_sync = ac_xclipse_legacy_sync(&pdev->info);
 
    ac_init_tracked_regs(&cs->tracked_regs, &pdev->info, false);
 }

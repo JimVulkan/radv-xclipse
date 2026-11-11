@@ -286,17 +286,15 @@ class VkExtension(object):
 
 
 def CamelCase_to_SHOUT_CASE(s):
-   return (s[:1] + re.sub(r'(?<![A-Z])([A-Z])', r'_\1', s[1:])).upper()
+   return re.sub(r'([0-9]+|[a-z_])([A-Z0-9])', r'\1_\2', s).upper()
 
-def compute_max_enum_name(s):
+def compute_max_enum_name(s, tags=()):
     if s == "VkSwapchainImageUsageFlagBitsANDROID":
         return "VK_SWAPCHAIN_IMAGE_USAGE_FLAG_BITS_MAX_ENUM"
-    if s == "VkTensorTilingARM":
-        return "VK_TENSOR_TILING_MAX_ENUM_ARM"
     max_enum_name = CamelCase_to_SHOUT_CASE(s)
     last_prefix = max_enum_name.rsplit('_', 1)[-1]
     # Those special prefixes need to be always at the end
-    if last_prefix in ['AMD', 'AMDX', 'EXT', 'INTEL', 'KHR', 'NV', 'LUNARG', 'QCOM', 'MSFT', 'ARM', 'SEC'] :
+    if last_prefix in tags:
         max_enum_name = "_".join(max_enum_name.split('_')[:-1])
         max_enum_name = max_enum_name + "_MAX_ENUM_" + last_prefix
     else:
@@ -307,9 +305,9 @@ def compute_max_enum_name(s):
 class VkEnum(object):
     """Simple struct-like class representing a single Vulkan Enum."""
 
-    def __init__(self, name, bitwidth=32, values=None):
+    def __init__(self, name, bitwidth=32, values=None, tags=()):
         self.name = name
-        self.max_enum_name = compute_max_enum_name(name)
+        self.max_enum_name = compute_max_enum_name(name, tags)
         self.bitwidth = bitwidth
         self.extension = None
         # Maps numbers to names
@@ -419,6 +417,7 @@ def parse_xml(enum_factory, ext_factory, struct_factory, bitmask_factory,
     api = 'vulkan'
 
     required_types = get_all_required(xml, 'type', api, beta)
+    tags = [t.attrib['name'] for t in xml.findall('./tags/tag')]
 
     for enum_type in xml.findall('./enums[@type="enum"]'):
         if not filter_api(enum_type, api):
@@ -428,7 +427,7 @@ def parse_xml(enum_factory, ext_factory, struct_factory, bitmask_factory,
         if not type_name in required_types:
             continue
 
-        enum = enum_factory(type_name)
+        enum = enum_factory(type_name, tags=tags)
         for value in enum_type.findall('./enum'):
             if filter_api(value, api):
                 enum.add_value_from_xml(value)

@@ -483,6 +483,15 @@ ycbcr_conversion_lookup(const void *data, uint32_t set, uint32_t binding, uint32
    }
 }
 
+static bool
+radv_xclipse_f2f16_rtz(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
+{
+   if (alu->op != nir_op_f2f16 || nir_src_bit_size(alu->src[0].src) != 32)
+      return false;
+   alu->op = nir_op_f2f16_rtz;
+   return true;
+}
+
 nir_shader *
 radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stage,
                          const struct radv_spirv_to_nir_options *options, bool is_internal)
@@ -848,6 +857,15 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
    NIR_PASS(_, nir, nir_lower_var_copies);
 
    NIR_PASS(_, nir, nir_lower_memcpy);
+
+   /* Xclipse: the vendor compiler converts f32 to f16 toward zero (probe/gfx/texfx on the 920 and
+    * 960: 1.7 -> 0x3ecc, 70000 -> 65504), where round-to-nearest-even turns values past the f16
+    * range into inf, which then spreads as inf/NaN. Conversions without an explicit RTE execution
+    * mode get the vendor's rounding. RADV's own shaders keep RTE. From paulowesll/mesa
+    * b393e1d6d8. */
+   if (compiler_info->hw.gfx11_isa && !is_meta_shader(nir) &&
+       !nir_is_rounding_mode_rtne(nir->info.float_controls_execution_mode, 16))
+      NIR_PASS(_, nir, nir_shader_alu_pass, radv_xclipse_f2f16_rtz, nir_metadata_control_flow, NULL);
 
    unsigned lower_flrp = (nir->options->lower_flrp16 ? 16 : 0) | (nir->options->lower_flrp32 ? 32 : 0) |
                          (nir->options->lower_flrp64 ? 64 : 0);
@@ -1889,7 +1907,10 @@ radv_precompute_registers_hw_gs(struct radv_device *device, const struct radv_sh
    regs->spi_shader_pgm_rsrc3_gs =
       ac_apply_cu_en(S_00B21C_CU_EN(0xffff) | S_00B21C_WAVE_LIMIT(0x3F), C_00B21C_CU_EN, 0, &pdev->info);
 
-   if (pdev->info.gfx_level >= GFX10) {
+   if (ac_xclipse_spi11(&pdev->info) & AC_XCLIPSE_SPI11_GS_RSRC4) {
+      /* GFX11 layout: no CU_EN(0xffff), which would set the GS wave throttle bits. */
+      regs->spi_shader_pgm_rsrc4_gs_hs = S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(0);
+   } else if (pdev->info.gfx_level >= GFX10) {
       regs->spi_shader_pgm_rsrc4_gs_hs =
          ac_apply_cu_en(S_00B204_CU_EN_GFX10(0xffff) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(0), C_00B204_CU_EN_GFX10,
                         16, &pdev->info);
@@ -1932,6 +1953,10 @@ radv_precompute_registers_hw_ngg(struct radv_device *device, struct radv_shader 
 
       regs->spi_shader_pgm_rsrc3_gs =
          ac_apply_cu_en(S_00B21C_CU_EN(cu_mask) | S_00B21C_WAVE_LIMIT(0x3F), C_00B21C_CU_EN, 0, &pdev->info);
+      if ((ac_xclipse_spi11(&pdev->info) & AC_XCLIPSE_SPI11_GS_RSRC4) && ac_xclipse_gs_cu_en() >= 0) {
+         regs->spi_shader_pgm_rsrc3_gs =
+            (regs->spi_shader_pgm_rsrc3_gs & C_00B21C_CU_EN) | S_00B21C_CU_EN(ac_xclipse_gs_cu_en());
+      }
 
       if (pdev->info.gfx_level >= GFX11) {
          unsigned inst_pref_size = radv_get_inst_pref_size(&device->compiler_info, shader->exec_size);
@@ -1940,6 +1965,10 @@ radv_precompute_registers_hw_ngg(struct radv_device *device, struct radv_shader 
             ac_apply_cu_en(S_00B204_CU_EN_GFX11(0x1) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_wave64) |
                               S_00B204_INST_PREF_SIZE(inst_pref_size),
                            C_00B204_CU_EN_GFX11, 16, &pdev->info);
+      } else if (ac_xclipse_spi11(&pdev->info) & AC_XCLIPSE_SPI11_GS_RSRC4) {
+         /* GFX11 layout on a GFX10.3 register interface: bits 14-15 are PH_THROTTLE_EN and
+          * SPI_THROTTLE_EN, so CU_EN(0xffff) must not be written. The vendor leaves bits 0-15 at 0. */
+         regs->spi_shader_pgm_rsrc4_gs_hs = S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_wave64);
       } else {
          regs->spi_shader_pgm_rsrc4_gs_hs =
             ac_apply_cu_en(S_00B204_CU_EN_GFX10(0xffff) | S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_wave64),
@@ -2434,6 +2463,12 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
                        S_00B12C_SO_BASE2_EN(!!info->so.strides[2]) | S_00B12C_SO_BASE3_EN(!!info->so.strides[3]) |
                        S_00B12C_SO_EN(!!info->so.enabled_stream_buffers_mask);
    }
+
+   /* Xclipse: MEM_ORDERED=1 on every stage, as Mesa 26.3 did (radv_mem_ordered()). 27.0 takes the
+    * bit from ACO, which clears it unless a wait mixes vmem types; that model is RDNA3's return
+    * ordering, and the A55 (530) freezes came back with 27.0 together with MEM_ORDERED=0. */
+   if (compiler_info->ac->desc_gfx_level != compiler_info->ac->gfx_level)
+      config->mem_ordered = true;
 
    config->rsrc1 = S_00B848_VGPRS((num_vgprs - 1) / (info->wave_size == 32 ? 8 : 4)) | S_00B848_DX10_CLAMP(dx10_clamp) |
                    S_00B848_FLOAT_MODE(config->float_mode);
@@ -3576,6 +3611,26 @@ radv_fill_llvm_compiler_options(struct radv_llvm_compiler_options *options,
    options->check_ir = compiler_info->debug.check_ir;
 }
 
+/* RADV_XCLIPSE_DLC / debug.radv_xclipse_dlc 1: device-scope loads in APP shaders set DLC too
+ * (GLC alone is shader-array scope on the Xclipse; see the device_scope_dlc site below). Off by
+ * default for its cost; the knob is folded into the cache UUID like every debug.radv_* property. */
+static bool
+radv_xclipse_app_dlc(void)
+{
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("RADV_XCLIPSE_DLC");
+      int on = e && e[0] && e[0] != '0';
+#if DETECT_OS_ANDROID
+      char p[PROP_VALUE_MAX] = {0};
+      if (!(e && e[0]) && __system_property_get("debug.radv_xclipse_dlc", p) > 0)
+         on = p[0] && p[0] != '0';
+#endif
+      v = on;
+   }
+   return v;
+}
+
 static inline void
 radv_aco_fill_compiler_options(struct aco_compiler_options *aco_info, const struct radv_compiler_info *compiler_info,
                                const struct radv_shader_stage_key *stage_key,
@@ -3603,6 +3658,7 @@ radv_aco_fill_compiler_options(struct aco_compiler_options *aco_info, const stru
    aco_info->has_vopd = aco_info->gfx_level >= GFX11 && !compiler_info->hw.gfx11_isa;
    aco_info->no_delay_alu = compiler_info->hw.gfx11_isa;
    aco_info->no_permlane64 = compiler_info->hw.gfx11_isa;
+   aco_info->ldsdir_valu_drain = compiler_info->hw.gfx11_isa;
    aco_info->gfx10_global_offsets = compiler_info->hw.gfx11_isa;
    aco_info->swizzle_no_idxen = compiler_info->hw.gfx11_isa;
    /* Set per shader in shader_compile(): RADV's own shaders only. */
@@ -3726,8 +3782,17 @@ radv_shader_nir_to_asm(const struct radv_compiler_info *compiler_info, struct ra
        * BVH build spins on other workgroups' writes (it hung on the 4-array 950). In app shaders
        * the Vulkan memory model marks every load behind a device-scope barrier coherent, and DLC
        * there sends all of them past GL1: Fenyx on the 530 lost about 5% and Eden on the 940
-       * "tanked a lot". */
-      ac_opts.device_scope_dlc = compiler_info->hw.gfx11_isa && is_meta_shader(shaders[0]);
+       * "tanked a lot".
+       * The tessellation evaluation stage gets it too: its offchip loads read what the hull shader
+       * waves of other shader arrays wrote into a ring that every draw reuses, so with GLC alone a
+       * TES can hit a line its own array's GL1 kept from an earlier draw. GFX10_3 RADV gives
+       * those loads GLC + DLC. Only the 940/950/960 have more than one shader array. The other
+       * Xclipse RADV port saw stale offchip data in tessellation (paulowesll/mesa a53dae3ab4). */
+      bool tes = false;
+      for (unsigned i = 0; i < shader_count; ++i)
+         tes |= shaders[i]->info.stage == MESA_SHADER_TESS_EVAL;
+      ac_opts.device_scope_dlc =
+         compiler_info->hw.gfx11_isa && (is_meta_shader(shaders[0]) || tes || radv_xclipse_app_dlc());
       radv_aco_convert_shader_info(&ac_info, info, args, compiler_info);
 
       if (compiler_info->key.use_elf) {

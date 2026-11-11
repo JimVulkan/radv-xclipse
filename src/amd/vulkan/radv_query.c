@@ -37,8 +37,16 @@ static void radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType qu
                               uint32_t pipeline_stats_mask, uint32_t avail_offset, bool uses_emulated_queries);
 
 static enum ac_barrier_flags
-get_query_flush_bits(VkQueryType query_type)
+get_query_flush_bits(const struct radv_physical_device *pdev, VkQueryType query_type)
 {
+   /* Xclipse: the Mesa 26.3 set. Ending a query (and waiting on one) idles PS and CS, flushes CB and
+    * DB through CACHE_FLUSH_AND_INV_TS and invalidates L2 and the vector cache. 27.0's bare
+    * BOTTOM_OF_PIPE wait came with the return of the A55 (530) freezes. */
+   const enum ac_barrier_flags xclipse_bits = AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2 |
+                                              AC_BARRIER_INV_VMEM | AC_BARRIER_SYNC_AND_INV_CB |
+                                              AC_BARRIER_SYNC_AND_INV_DB;
+   const bool xclipse = ac_xclipse_legacy_sync(&pdev->info);
+
    /* Use a BOTTOM_OF_PIPE barrier wait for EOP event writes because it's faster than waiting for
     * individual queries with WAIT_REG_MEM.
     */
@@ -53,7 +61,7 @@ get_query_flush_bits(VkQueryType query_type)
    case VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT:
    case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
    case VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT:
-      return AC_BARRIER_SYNC_BOTTOM_OF_PIPE;
+      return xclipse ? xclipse_bits : AC_BARRIER_SYNC_BOTTOM_OF_PIPE;
 
    /* Performance queries wait for idle in EndQuery. */
    case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR:
@@ -1702,7 +1710,7 @@ radv_query_shader(struct radv_cmd_buffer *cmd_buffer, VkQueryType query_type, st
    cmd_buffer->state.flush_bits |= AC_BARRIER_INV_VMEM;
 
    if (flags & VK_QUERY_RESULT_WAIT_BIT)
-      cmd_buffer->state.flush_bits |= get_query_flush_bits(query_type);
+      cmd_buffer->state.flush_bits |= get_query_flush_bits(pdev, query_type);
 
    /* Make EOP event writes visible to the shader if they arrived. */
    if (pdev->info.gfx_level <= GFX8 || pdev->info.cp_sdma_ge_use_system_memory_scope)
@@ -1802,7 +1810,8 @@ radv_create_query_pool(struct radv_device *device, const VkQueryPoolCreateInfo *
         pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT));
 
    /* The number of task shader invocations needs to be queried on ACE. */
-   pool->uses_ace = (pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT);
+   pool->uses_ace = (pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT) &&
+                    !pdev->xclipse_taskmesh_emul;
 
    pool->uses_shader_query_buf =
       pdev->info.gfx_level >= GFX11 && (pool->vk.query_type == VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT ||
@@ -2590,7 +2599,8 @@ emit_end_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *pool,
       UNREACHABLE("ending unhandled query type");
    }
 
-   cmd_buffer->active_query_flush_bits |= get_query_flush_bits(query_type);
+   cmd_buffer->active_query_flush_bits |=
+      get_query_flush_bits(radv_device_physical(radv_cmd_buffer_device(cmd_buffer)), query_type);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2721,7 +2731,7 @@ radv_CmdWriteTimestamp2(VkCommandBuffer commandBuffer, VkPipelineStageFlags2 sta
       query_va += pool->stride;
    }
 
-   cmd_buffer->active_query_flush_bits |= get_query_flush_bits(VK_QUERY_TYPE_TIMESTAMP);
+   cmd_buffer->active_query_flush_bits |= get_query_flush_bits(pdev, VK_QUERY_TYPE_TIMESTAMP);
    assert(cs->b->cdw <= cdw_max);
 }
 

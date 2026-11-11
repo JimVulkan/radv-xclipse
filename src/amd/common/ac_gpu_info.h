@@ -593,6 +593,13 @@ const struct ac_xclipse_chip *ac_xclipse_chip_info(const struct radeon_info *inf
 /* This chip's vendor binner configuration, or NULL to bin the upstream way. */
 const struct ac_xclipse_pbb *ac_xclipse_pbb(const struct radeon_info *info);
 bool ac_xclipse_full_db_flush(const struct radeon_info *info);
+bool ac_xclipse_mesh_shaders(const struct radeon_info *info);
+bool ac_xclipse_legacy_sync(const struct radeon_info *info);
+#define AC_XCLIPSE_SPI11_GS_RSRC4     0x1
+#define AC_XCLIPSE_SPI11_PS_LDS_GROUP 0x2
+unsigned ac_xclipse_spi11(const struct radeon_info *info);
+int ac_xclipse_gs_cu_en(void);
+unsigned ac_xclipse_texture_filter_opt(void);
 int ac_get_gs_table_depth(enum amd_gfx_level gfx_level, enum radeon_family family);
 void ac_get_raster_config(const struct radeon_info *info, uint32_t *raster_config_p,
                           uint32_t *raster_config_1_p, uint32_t *se_tile_repeat_p);

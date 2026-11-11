@@ -541,3 +541,70 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
       }
    }
 }
+
+/* Xclipse task/mesh emulation, see radv_meta_nir_build_xclipse_mesh_tasks_cs. */
+void
+radv_xclipse_convert_mesh_tasks(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint32_t stride,
+                                uint64_t count_va, uint32_t max_count, bool task, uint64_t dst_va)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   enum radv_meta_object_key_type key = RADV_META_OBJECT_KEY_XCLIPSE_MESH_TASKS_CS;
+   VkPipelineLayout layout;
+   VkPipeline pipeline;
+   VkResult result;
+
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 36,
+   };
+
+   result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key, sizeof(key),
+                                        &layout);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      return;
+   }
+
+   pipeline = vk_meta_lookup_pipeline(&device->meta_state.device, &key, sizeof(key));
+   if (pipeline == VK_NULL_HANDLE) {
+      nir_shader *cs = radv_meta_nir_build_xclipse_mesh_tasks_cs();
+
+      const VkPipelineShaderStageCreateInfo stage_info = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+         .module = vk_shader_module_handle_from_nir(cs),
+         .pName = "main",
+      };
+
+      const VkComputePipelineCreateInfo pipeline_info = {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .stage = stage_info,
+         .layout = layout,
+      };
+
+      result = vk_meta_create_compute_pipeline(&device->vk, &device->meta_state.device, &pipeline_info, &key,
+                                               sizeof(key), &pipeline);
+      ralloc_free(cs);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         return;
+      }
+   }
+
+   radv_meta_begin(cmd_buffer);
+
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
+
+   const uint32_t constants[9] = {
+      src_va, src_va >> 32, dst_va, dst_va >> 32, count_va, count_va >> 32, stride, max_count, task,
+   };
+
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
+
+   radv_unaligned_dispatch(cmd_buffer, max_count, 1, 1);
+
+   radv_meta_end(cmd_buffer);
+
+   /* The CP reads the result. */
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM | AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME;
+}

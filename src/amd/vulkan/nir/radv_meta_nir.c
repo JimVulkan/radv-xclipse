@@ -1733,3 +1733,52 @@ radv_meta_nir_build_copy_memory_to_image_indirect_fs(VkImageAspectFlags aspect_m
 
    return b.shader;
 }
+
+/* Xclipse task/mesh emulation: turn VkDrawMeshTasksIndirectCommandEXT entries into 16-byte
+ * records, either DRAW_INDIRECT commands for a mesh-only draw (one vertex per workgroup, the grid
+ * packed into firstVertex/firstInstance) or dispatch sizes for the task shader. Entries past the
+ * count read as empty. */
+nir_shader *
+radv_meta_nir_build_xclipse_mesh_tasks_cs(void)
+{
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_xclipse_mesh_tasks_cs");
+   b.shader->info.workgroup_size[0] = 64;
+
+   nir_def *id = radv_meta_nir_get_global_ids(&b, 1);
+
+   nir_def *src_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0, .range = 8);
+   nir_def *dst_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 8, .range = 8);
+   nir_def *count_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 16, .range = 8);
+   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 24, .range = 4);
+   nir_def *max_count = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
+   nir_def *task = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
+
+   nir_def *count_mem;
+   nir_push_if(&b, nir_ine_imm(&b, count_addr, 0));
+   {
+      count_mem = nir_umin(&b, nir_build_load_global(&b, 1, 32, count_addr, .align_mul = 4), max_count);
+   }
+   nir_pop_if(&b, NULL);
+   nir_def *count = nir_if_phi(&b, count_mem, max_count);
+
+   nir_def *grid_mem;
+   nir_push_if(&b, nir_ult(&b, id, count));
+   {
+      grid_mem = nir_build_load_global(&b, 3, 32, nir_iadd(&b, src_addr, nir_u2u64(&b, nir_imul(&b, id, stride))),
+                                       .align_mul = 4);
+   }
+   nir_pop_if(&b, NULL);
+   nir_def *grid = nir_if_phi(&b, grid_mem, nir_imm_zero(&b, 3, 32));
+
+   nir_def *x = nir_channel(&b, grid, 0);
+   nir_def *y = nir_channel(&b, grid, 1);
+   nir_def *z = nir_channel(&b, grid, 2);
+   nir_def *draw = nir_vec4(&b, nir_imul(&b, nir_imul(&b, x, y), z), nir_imm_int(&b, 1),
+                            nir_ior(&b, x, nir_ishl_imm(&b, y, 16)), z);
+   nir_def *dispatch = nir_vec4(&b, x, y, z, nir_imm_int(&b, 0));
+
+   nir_build_store_global(&b, nir_bcsel(&b, nir_ine_imm(&b, task, 0), dispatch, draw),
+                          nir_iadd(&b, dst_addr, nir_u2u64(&b, nir_imul_imm(&b, id, 16))), .align_mul = 4);
+
+   return b.shader;
+}
