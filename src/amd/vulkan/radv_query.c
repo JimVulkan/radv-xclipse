@@ -138,6 +138,18 @@ enum radv_event_write {
    RADV_EVENT_WRITE_OCCLUSION_QUERY,
 };
 
+static bool
+radv_occlusion_uses_event_write_zpass(const struct radeon_info *info)
+{
+   return info->gfx_level >= GFX11 && info->pfp_fw_version >= EVENT_WRITE_ZPASS_PFP_VERSION;
+}
+
+static bool
+radv_occlusion_uses_pixel_pipe_stat_dump(const struct radeon_info *info)
+{
+   return (info->gfx_level >= GFX11 || info->gfx11_shader_core) && !radv_occlusion_uses_event_write_zpass(info);
+}
+
 static void
 radv_emit_event_write(const struct radeon_info *info, struct radv_cmd_stream *cs, enum radv_event_write event,
                       uint64_t va)
@@ -148,12 +160,12 @@ radv_emit_event_write(const struct radeon_info *info, struct radv_cmd_stream *cs
       radeon_emit(PKT3(PKT3_EVENT_WRITE, 2, 0));
       radeon_emit(EVENT_TYPE(V_028A90_SAMPLE_PIPELINESTAT) | EVENT_INDEX(2));
    } else if (event == RADV_EVENT_WRITE_OCCLUSION_QUERY) {
-      if (info->gfx_level >= GFX11 && info->pfp_fw_version >= EVENT_WRITE_ZPASS_PFP_VERSION) {
+      if (radv_occlusion_uses_event_write_zpass(info)) {
          radeon_emit(PKT3(PKT3_EVENT_WRITE_ZPASS, 1, 0));
       } else {
          radeon_emit(PKT3(PKT3_EVENT_WRITE, 2, 0));
          /* Xclipse 920: the DB ignores ZPASS_DONE; it uses the GFX11 PIXEL_PIPE mechanism. */
-         if (info->gfx_level >= GFX11 || info->gfx11_shader_core) {
+         if (radv_occlusion_uses_pixel_pipe_stat_dump(info)) {
             radeon_emit(EVENT_TYPE(V_028A90_PIXEL_PIPE_STAT_DUMP) | EVENT_INDEX(1));
          } else {
             radeon_emit(EVENT_TYPE(V_028A90_ZPASS_DONE) | EVENT_INDEX(1));
@@ -367,6 +379,14 @@ radv_end_occlusion_query(struct radv_cmd_buffer *cmd_buffer, uint64_t va)
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   /* On Xclipse 950, wait for pixel shader work before sampling the end count with
+    * PIXEL_PIPE_STAT_DUMP to avoid leaving the query unavailable.
+    */
+   if (pdev->info.xclipse_model == AC_XCLIPSE_950 && radv_occlusion_uses_pixel_pipe_stat_dump(&pdev->info)) {
+      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_PS;
+      radv_emit_cache_flush(cmd_buffer, false);
+   }
 
    radeon_check_space(device->ws, cs->b, 14);
 
